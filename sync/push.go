@@ -69,23 +69,8 @@ func (e *Engine) drain(ctx context.Context) error {
 		for i := 0; i < len(items); {
 			if batch := e.batchable(items[i:]); len(batch) > 1 {
 				i += len(batch)
-				// Record every commit first, so a conflict's catching up
-				// recognizes the batch's own changes.
-				e.sendBatch(ctx, batch)
-				for _, b := range batch {
-					b.res.out, b.res.err = e.applySend(b.q, b.q.Path, b.flags, b.st, b.h, b.res)
-				}
-				for _, b := range batch {
-					if !e.queued(b.q) {
-						continue
-					}
-					out, err := b.res.out, b.res.err
-					if b.redo {
-						out, err = e.push(ctx, b.q)
-					}
-					if err := handle(b.q, out, err); err != nil {
-						return err
-					}
+				if err := e.sendRun(ctx, batch, handle); err != nil {
+					return err
 				}
 				continue
 			}
@@ -109,9 +94,10 @@ func (e *Engine) drain(ctx context.Context) error {
 	return nil
 }
 
-// Batches of small files are sent with this many in flight.
+// Runs of small files are sent with batchConns in flight, up to batchMax
+// at a time.
 const (
-	batchMax   = 256
+	batchMax   = 4096
 	batchConns = 8
 	batchSize  = 4 << 20 // larger files go one at a time, with resumable stage names
 
@@ -163,40 +149,108 @@ func (e *Engine) batchable(items []*qent) []*batchItem {
 	return out
 }
 
-// sendBatch hashes and sends the batch's files with batchConns in flight.
-// It reads the engine's state but does not change it; drain records the
-// results in order afterwards.
-func (e *Engine) sendBatch(ctx context.Context, batch []*batchItem) {
-	work := make(chan *batchItem)
+// sendRun hashes and sends the run's files with batchConns in flight,
+// starting the next file as soon as one finishes. It records each result in
+// the engine's state in order, as soon as every file before it has been
+// recorded, and passes it to handle; the workers only read the disk and
+// talk to the server. Conflicts, and files that need pushing on their own,
+// wait until every file sent has been recorded, so that catching up
+// recognizes the run's own commits. After an error from handle, no new
+// file is started, but every file sent is still recorded.
+func (e *Engine) sendRun(ctx context.Context, run []*batchItem, handle func(*qent, outcome, error) error) error {
+	n := len(run)
+	work := make(chan int)
+	finished := make(chan int, n)
+	stop := make(chan struct{})
 	var wg gosync.WaitGroup
-	for range min(batchConns, len(batch)) {
+	for range min(batchConns, n) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for b := range work {
-				h, err := e.hashFile(b.q.Path)
-				if err != nil {
-					b.res = sent{out: later, err: err}
-					continue
-				}
-				if b.row != nil && h == b.row.Hash && b.st.mode == b.row.Mode {
-					b.redo = true // touched, not changed: push records the new stat
-					continue
-				}
-				if now, err := e.stat(b.q.Path); err != nil || now != b.st {
-					b.res = sent{out: later, err: err} // still being written
-					continue
-				}
-				b.h = h
-				b.res = e.sendFile(ctx, b.q, b.q.Path, b.base, b.st, h, false)
+			for i := range work {
+				e.sendItem(ctx, run[i])
+				finished <- i
 			}
 		}()
 	}
-	for _, b := range batch {
-		work <- b
+	go func() {
+		defer close(work)
+		for i := range run {
+			select {
+			case work <- i:
+			case <-stop:
+				return
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+
+	var (
+		firstErr error
+		deferred []*batchItem
+		done     = make([]bool, n)
+		next     int
+	)
+	// Files start in order, so the ones sent are always a prefix of run.
+	for i := range finished {
+		done[i] = true
+		for next < n && done[next] {
+			b := run[next]
+			next++
+			b.res.out, b.res.err = e.applySend(b.q, b.q.Path, b.flags, b.st, b.h, b.res)
+			if firstErr != nil || !e.queued(b.q) {
+				continue
+			}
+			if b.redo || b.res.err == nil && b.res.out == conflict {
+				deferred = append(deferred, b)
+				continue
+			}
+			if err := handle(b.q, b.res.out, b.res.err); err != nil {
+				firstErr = err
+				close(stop)
+			}
+		}
 	}
-	close(work)
-	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	for _, b := range deferred {
+		if !e.queued(b.q) {
+			continue
+		}
+		out, err := b.res.out, b.res.err
+		if b.redo {
+			out, err = e.push(ctx, b.q)
+		}
+		if err := handle(b.q, out, err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sendItem hashes and sends one file of a run, leaving the result in b.
+// It reads the disk and talks to the server, but does not touch the
+// engine's state, so several can run at once.
+func (e *Engine) sendItem(ctx context.Context, b *batchItem) {
+	h, err := e.hashFile(b.q.Path)
+	if err != nil {
+		b.res = sent{out: later, err: err}
+		return
+	}
+	if b.row != nil && h == b.row.Hash && b.st.mode == b.row.Mode {
+		b.redo = true // touched, not changed: push records the new stat
+		return
+	}
+	if now, err := e.stat(b.q.Path); err != nil || now != b.st {
+		b.res = sent{out: later, err: err} // still being written
+		return
+	}
+	b.h = h
+	b.res = e.sendFile(ctx, b.q, b.q.Path, b.base, b.st, h, false)
 }
 
 func (e *Engine) queued(q *qent) bool { return e.st.queued(q) }
