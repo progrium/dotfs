@@ -794,9 +794,21 @@ func TestPlain9P(t *testing.T) {
 		}
 		r.quiet(100 * time.Millisecond)
 		r.sendTag(&pfcall{Type: treadP, Fid: 5, Count: 4096}, 52)
-		r.rpc(&pfcall{Type: twriteP, Fid: 4, Data: []byte("rm /m")})
-		if f := r.recv(); f.Tag != 52 || string(f.Data) != "5 del /m\n" {
-			t.Fatalf("event after flush %v %q", f, f.Data)
+		// The event can be answered before the write that caused it.
+		r.sendTag(&pfcall{Type: twriteP, Fid: 4, Data: []byte("rm /m")}, 53)
+		for range 2 {
+			switch f := r.recv(); f.Tag {
+			case 52:
+				if string(f.Data) != "5 del /m\n" {
+					t.Fatalf("event after flush %v %q", f, f.Data)
+				}
+			case 53:
+				if f.Type != rwriteP {
+					t.Fatalf("rm write: %v", f)
+				}
+			default:
+				t.Fatalf("unexpected reply %v", f)
+			}
 		}
 
 		// Errors are strings.

@@ -26,6 +26,7 @@ const (
 	tflushP   = plan9.Tflush
 	rflushP   = plan9.Rflush
 	rwstatP   = plan9.Rwstat
+	rwriteP   = plan9.Rwrite
 	rerrorP   = plan9.Rerror
 )
 
