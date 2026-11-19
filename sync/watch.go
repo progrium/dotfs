@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/progrium/dotfs/fsproto"
@@ -18,6 +19,8 @@ type watcher struct {
 	w     *fsnotify.Watcher
 	hints chan hint
 	done  chan struct{}
+
+	fullPending atomic.Bool // a full-scan hint is on its way
 }
 
 func (e *Engine) watch() (*watcher, error) {
@@ -72,10 +75,17 @@ func (w *watcher) send(h hint) {
 	select {
 	case w.hints <- h:
 	default:
-		// The loop is busy; a full scan catches up on everything.
-		select {
-		case w.hints <- hint{"/", true}:
-		default:
+		// The engine is busy and the hints are backed up: hand it one
+		// full scan, which catches up on everything, without blocking
+		// this loop and without dropping it.
+		if w.fullPending.CompareAndSwap(false, true) {
+			go func() {
+				defer w.fullPending.Store(false)
+				select {
+				case w.hints <- hint{"/", true}:
+				case <-w.done:
+				}
+			}()
 		}
 	}
 }
