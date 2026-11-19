@@ -39,6 +39,27 @@ Not measured yet: a real network, larger roots, and the kernel 9P mount.
 
 ## Entries
 
+### 2026-11-19: sync client memory (541cc38, e8bb2ad, b840c35, and 4c6aace)
+
+Four changes to the `dotfs sync` client: ctl replies read with a pooled 4 KiB buffer instead of a new 252 KiB one per command (`client/ctl.go`); pooled 32 KiB copy buffers and BLAKE3 hashers, with 16 KiB of spare capacity so the hasher stops allocating padded copies of each write's last chunks; the content-hash index as one path per raw 32-byte digest, with a second map only for duplicate content, instead of a set of paths per hex string; and a soft memory limit of 128 MiB (`-memlimit`, 0 for none, `$GOMEMLIMIT` wins). Full benchmark, 100,000-file corpus, on a 4-vCPU Xeon @ 2.10 GHz: two runs each of dev at c4c3455 and of these commits, and one of these commits with `GOMEMLIMIT=off` to separate the limit from the rest. Cells give the first run, then the second; the heap and allocation rows come from the first run of each, whose binaries sampled the heap every 2 s.
+
+| Measure | Before | After | After, no limit |
+| --- | --- | --- | --- |
+| Peak RSS, client A (seeds, then sends) | 298, 278 MB | **166, 162 MB** | 250 MB |
+| Peak RSS, client B (bootstraps, then receives) | 271, 265 MB | **145, 144 MB** | 203 MB |
+| Peak live heap, A and B | 210 and 219 MB | **118 and 104 MB** | |
+| Bytes allocated, A over the whole run | 76.9 GB | **5.7 GB** | |
+| Bytes allocated, B before its restart | 11.2 GB | **5.0 GB** | |
+| Garbage collections, A and B | 1,574 and 168 | 210 and 171 | |
+| Seed device A | 275.3, 271.2 s | 245.8, 241.2 s | 243.4 s |
+| Bootstrap B | 56.2, 53.9 s | 53.5, 53.5 s | 52.6 s |
+| Change to visible, p95 | 1.02, 1.23 s | 1.11, 1.26 s | 1.30 s |
+| Change to visible, worst of 20 | 1.02, 2.18 s | 2.21, 2.53 s | 3.22 s |
+| 10,000 new 4 KiB files, A to B | 28.9, 27.6 s | 26.2, 27.5 s | 25.6 s |
+| Reconnect after 1,000 offline changes per side | 19.0, 18.7 s | 16.9, 18.8 s | 17.8 s |
+
+Before, ctl reply buffers were 51 GB of A's allocations, 32 KiB copy buffers 6 GB, and the BLAKE3 hasher's padded chunk copies 3.8 GB. Peak RSS falls by about a third from the allocation fixes alone and by about 45% with the limit, which binds only briefly: the live heap peaks near it during the bootstrap's index reconcile. Seeding is about 10% faster; the other timings are within run-to-run spread. The worst change-to-visible time varies from 1.0 to 3.2 s across all five runs, old code and new, with and without the limit, so it is not from these changes. What allocates most now: `client.Upload`'s buffer per file (1.6 GB on A), `context.AfterFunc` from WebSocket read deadlines (0.6 GB), and p9's message buffers (about 0.4 GB each way).
+
 ### 2026-11-19: sync, never drop the watcher's catch-up scan (d346a52)
 
 When the hint channel filled, the watcher tried to send its full-scan hint into the same full channel and dropped it, so changes from a burst waited for the periodic scan, a minute later. Reconnect after 1,000 offline changes per side, 100,000-file corpus: 58.7 s and 14.8 s in two runs before; 20.3 s and 14.2 s after. The dropped hint is the likely cause of the 58.7 s run, but it was not traced directly.
@@ -58,5 +79,5 @@ The cross-process integration tests and `bench`. No change in speed or space.
 ## Follow-ups
 
 - Commit throughput for small files: batch fsyncs on the server (group commit across a scope's writer), or let a client commit several staged files in one command.
-- Client memory: keep rows in SQLite and cache only what a cycle needs.
+- Client memory: keep rows in SQLite and cache only what a cycle needs (rows are most of the live heap now); reuse `client.Upload`'s buffers.
 - Run the benchmark across a real network, where dotfs's fewer round trips per file should matter more and its sequential large-file uploads may matter less.

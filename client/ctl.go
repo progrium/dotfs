@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/hugelgupf/p9/p9"
 
@@ -49,13 +50,25 @@ func (c *Client) Ctl(ctx context.Context, cmd fsproto.Command) (fsproto.Reply, e
 	}
 }
 
+// ctlBufs holds the buffers ctlOnce reads replies with. A reply is one
+// short line, so a small buffer read again at the next offset beats one of
+// the message size per command, which made ctl most of what a busy client
+// allocated.
+var ctlBufs = newCtlBufs(4 << 10)
+
+func newCtlBufs(size int) *sync.Pool {
+	return &sync.Pool{New: func() any { b := make([]byte, size); return &b }}
+}
+
 func (c *Client) ctlOnce(f p9.File, cmd fsproto.Command) (fsproto.Reply, error) {
 	line := cmd.Encode()
 	if err := writeFull(f, []byte(line), 0); err != nil {
 		return fsproto.Reply{}, pathErr("ctl write", "/.fs/ctl", err)
 	}
 	var buf bytes.Buffer
-	b := make([]byte, c.readSize())
+	bp := ctlBufs.Get().(*[]byte)
+	defer ctlBufs.Put(bp)
+	b := *bp
 	for off := int64(0); ; {
 		n, err := f.ReadAt(b, off)
 		buf.Write(b[:n])

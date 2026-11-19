@@ -55,7 +55,7 @@ type state struct {
 
 	rows   map[string]*row
 	kids   map[string]map[string]struct{} // parent path -> child paths with rows
-	hashes map[string]map[string]struct{} // content hash -> file paths with rows
+	hashes hashIndex                      // content hash -> file paths with rows
 	queue  []*qent                        // in ID order; may hold dead entries, so read it through pending
 	seq    uint64
 	meta   map[string]string
@@ -110,7 +110,7 @@ func openState(dir string) (*state, error) {
 		db:        db,
 		rows:      map[string]*row{},
 		kids:      map[string]map[string]struct{}{},
-		hashes:    map[string]map[string]struct{}{},
+		hashes:    newHashIndex(),
 		meta:      map[string]string{},
 		dirtyRows: map[string]struct{}{},
 		qkeys:     map[qkey]*qent{},
@@ -209,12 +209,7 @@ func (s *state) put(r *row) {
 	}
 	s.rows[p] = r
 	if r.Type == fsproto.TypeFile && r.Hash != "" {
-		h := s.hashes[r.Hash]
-		if h == nil {
-			h = map[string]struct{}{}
-			s.hashes[r.Hash] = h
-		}
-		h[p] = struct{}{}
+		s.hashes.add(r.Hash, p)
 	}
 	s.dirtyRows[p] = struct{}{}
 	if p == "/" {
@@ -229,26 +224,26 @@ func (s *state) put(r *row) {
 	k[p] = struct{}{}
 }
 
-// del removes the row at p only (not its descendants).
 func (s *state) unhash(r *row) {
-	if h := s.hashes[r.Hash]; h != nil {
-		delete(h, r.Path)
-		if len(h) == 0 {
-			delete(s.hashes, r.Hash)
-		}
+	if r.Type == fsproto.TypeFile && r.Hash != "" {
+		s.hashes.remove(r.Hash, r.Path)
 	}
 }
 
-// withHash returns the paths of file rows with content hash h.
+// withHash returns the paths of file rows with content hash h, sorted.
 func (s *state) withHash(h string) []string {
 	var out []string
-	for p := range s.hashes[h] {
-		out = append(out, p)
+	for _, p := range s.hashes.paths(h) {
+		// Keys other than b3 digests are themselves hashed, so check.
+		if r := s.rows[p]; r != nil && r.Hash == h {
+			out = append(out, p)
+		}
 	}
 	sort.Strings(out)
 	return out
 }
 
+// del removes the row at p only (not its descendants).
 func (s *state) del(p string) {
 	r, ok := s.rows[p]
 	if !ok {

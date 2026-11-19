@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ func init() {
 		scan := fs.Duration("scan", time.Minute, "how often to rescan the whole folder")
 		nowatch := fs.Bool("nowatch", false, "do not watch the folder; rely on the periodic scan")
 		quiet := fs.Bool("q", false, "log only problems")
+		memlimit := fs.Int64("memlimit", 128, "soft memory limit in MiB, past which the Go runtime collects garbage more often; 0 for none (ignored when $GOMEMLIMIT is set)")
 		fs.Usage = func() {
 			fmt.Fprintf(fs.Output(), `usage: dotfs %s
 
@@ -48,6 +50,9 @@ The folder's sync state lives in <dir>/%s/, which is never synced.
 		}
 		if fs.NArg() != 2 {
 			return errUsage
+		}
+		if *memlimit > 0 && os.Getenv("GOMEMLIMIT") == "" {
+			debug.SetMemoryLimit(*memlimit << 20)
 		}
 		addr, name, err := splitRoot(fs.Arg(0))
 		if err != nil {
