@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -242,6 +245,49 @@ func TestHub(t *testing.T, newHub NewHub) {
 		wantSeqs(t, collect(t, s, 1), 1, 1)
 	})
 
+	t.Run("Coalesce", func(t *testing.T) {
+		// A Hub may merge records with coalesce, or not. Either way the
+		// records arrive in increasing seq order, and applying them to the
+		// empty tree gives the scope's tree at the seq last read. A reader
+		// that reads in rounds, while changes continue, checks that at
+		// every round.
+		e := newHubEnv(t, newHub, 100000)
+		co := e.subscribe(fsproto.EventsSetup{Since: 0, HasSince: true, Coalesce: true})
+		all := e.subscribe(fsproto.EventsSetup{Since: 0, HasSince: true})
+		got := map[string]fsproto.Entry{}
+		var last, records uint64
+		for round := 0; round < 60; round++ {
+			hubWorkload(e, round, 40)
+			cur := must[uint64](t, "Seq")(e.m.Seq(ctx, e.scope))
+			if cur == last {
+				continue
+			}
+			want := map[string]fsproto.Entry{}
+			_ = must[uint64](t, "Entries")(e.m.Entries(ctx, e.scope, func(en fsproto.Entry) error {
+				if en.Path != "/" {
+					want[en.Path] = en
+				}
+				return nil
+			}))
+			wantSeqs(t, collectTo(t, all, cur), last+1, cur)
+			evs := collectTo(t, co, cur)
+			for i, ev := range evs {
+				if ev.Seq <= last {
+					t.Fatalf("round %d: record %d has seq %d after %d", round, i, ev.Seq, last)
+				}
+				last = ev.Seq
+				if err := applyEvent(got, ev); err != nil {
+					t.Fatalf("round %d: %v", round, err)
+				}
+			}
+			records += uint64(len(evs))
+			if g, w := treeString(got), treeString(want); g != w {
+				t.Fatalf("round %d: records up to %d give\n%s\nwant\n%s", round, cur, g, w)
+			}
+		}
+		t.Logf("%d records with coalesce for %d changes", records, last)
+	})
+
 	t.Run("Close", func(t *testing.T) {
 		e := newHubEnv(t, newHub, 100)
 		s := e.subscribe(fsproto.EventsSetup{})
@@ -252,4 +298,144 @@ func TestHub(t *testing.T, newHub NewHub) {
 			t.Fatal("Next on a closed stream succeeded")
 		}
 	})
+}
+
+// hubWorkload makes n pseudo-random changes, varying with seed, over a few paths: files written
+// and rewritten, directories made, flagged, moved, and removed. Changes that
+// fail (a missing parent, a non-empty directory) are skipped.
+func hubWorkload(e *hubEnv, seed, n int) {
+	names := []string{"/a", "/b", "/c", "/a/x", "/a/y", "/b/x", "/b/y", "/a/x/z", "/b/x/z", "/f"}
+	x := uint32(seed)*2654435761 + 1
+	rnd := func(k int) int {
+		x ^= x << 13
+		x ^= x >> 17
+		x ^= x << 5
+		return int(x % uint32(k))
+	}
+	o := server.Origin{User: "alice", Dev: "d"}
+	if seed == 0 {
+		// Cases a careless coalesce gets wrong: a directory removed after
+		// children were added, a path reused after its parent was removed,
+		// and a path reused after a move.
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/a"})
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/a/x"})
+		e.w.Rmtree(ctx, o, fsproto.RmtreeCmd{Path: "/a"})
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/b"})
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/b/x"})
+		e.w.Rmtree(ctx, o, fsproto.RmtreeCmd{Path: "/b"})
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/b"})
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/b/x"})
+		e.w.SetFlags(ctx, o, fsproto.FlagsCmd{Path: "/b/x", Flags: "p"})
+		e.w.Mv(ctx, o, fsproto.MvCmd{From: "/b", To: "/c"})
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/b"})
+		e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: "/b/x"})
+		e.w.SetFlags(ctx, o, fsproto.FlagsCmd{Path: "/b/x", Flags: "p"})
+	}
+	for i := 0; i < n; i++ {
+		p := names[rnd(len(names))]
+		switch op := rnd(11); {
+		case op < 3:
+			e.w.Mkdir(ctx, o, fsproto.MkdirCmd{Path: p})
+		case op < 6:
+			e.n++
+			name := fmt.Sprintf("co-%d", e.n)
+			stage(e.t, e.st, "alice", name, []byte(name))
+			e.w.Commit(ctx, o, fsproto.CommitCmd{Stage: name, Path: p, Base: fsproto.Any, Mode: 0o644})
+			e.st.RemoveStage("alice", name)
+		case op < 8:
+			e.w.SetFlags(ctx, o, fsproto.FlagsCmd{Path: p, Flags: fsproto.Flags([]string{"", "p"}[rnd(2)])})
+		case op < 9:
+			e.w.Rm(ctx, o, fsproto.RmCmd{Path: p})
+		case op < 10:
+			e.w.Rmtree(ctx, o, fsproto.RmtreeCmd{Path: p})
+		default:
+			e.w.Mv(ctx, o, fsproto.MvCmd{From: p, To: names[rnd(len(names))]})
+		}
+	}
+}
+
+// collectTo reads records until one has seq at least to.
+func collectTo(t *testing.T, s server.Stream, to uint64) []fsproto.Event {
+	t.Helper()
+	var out []fsproto.Event
+	for len(out) == 0 || out[len(out)-1].Seq < to {
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		evs, err := s.Next(c)
+		cancel()
+		if err != nil {
+			t.Fatalf("Next after %d records: %v", len(out), err)
+		}
+		for _, ev := range evs {
+			if ev.Op == fsproto.OpReset || ev.Op == fsproto.OpSeq {
+				t.Fatalf("unexpected record %+v", ev)
+			}
+		}
+		out = append(out, evs...)
+	}
+	return out
+}
+
+// applyEvent applies a record to a tree of entries keyed by path. It fails
+// on a record the tree is not ready for, such as a put whose parent does not
+// exist, which a reordering coalesce would cause.
+func applyEvent(tree map[string]fsproto.Entry, ev fsproto.Event) error {
+	isDir := func(p string) bool {
+		en, ok := tree[p]
+		return p == "/" || ok && en.Type == fsproto.TypeDir
+	}
+	switch ev.Op {
+	case fsproto.OpPut:
+		if !isDir(path.Dir(ev.Entry.Path)) {
+			return fmt.Errorf("%d put %s without its parent", ev.Seq, ev.Entry.Path)
+		}
+		tree[ev.Entry.Path] = ev.Entry
+	case fsproto.OpDel:
+		for p := range tree {
+			if fsproto.Within(p, ev.Path) {
+				delete(tree, p)
+			}
+		}
+	case fsproto.OpMv:
+		if _, ok := tree[ev.Path]; !ok {
+			return fmt.Errorf("%d mv of missing %s", ev.Seq, ev.Path)
+		}
+		if !isDir(path.Dir(ev.To)) {
+			return fmt.Errorf("%d mv to %s without its parent", ev.Seq, ev.To)
+		}
+		for p := range tree {
+			if fsproto.Within(p, ev.To) {
+				delete(tree, p)
+			}
+		}
+		moved := map[string]fsproto.Entry{}
+		for p, en := range tree {
+			if fsproto.Within(p, ev.Path) {
+				delete(tree, p)
+				en.Path = fsproto.Rebase(p, ev.Path, ev.To)
+				moved[en.Path] = en
+			}
+		}
+		for p, en := range moved {
+			tree[p] = en
+		}
+	case fsproto.OpFlags:
+		en, ok := tree[ev.Path]
+		if !ok {
+			return fmt.Errorf("%d flags of missing %s", ev.Seq, ev.Path)
+		}
+		en.Flags = ev.Flags
+		tree[ev.Path] = en
+	}
+	return nil
+}
+
+// treeString lists each path's type, hash, and flags, sorted. Versions are
+// left out: a flags record does not carry the path's new version.
+func treeString(tree map[string]fsproto.Entry) string {
+	var lines []string
+	for p, en := range tree {
+		lines = append(lines, fmt.Sprintf("%s %v %s %s", p, en.Type, en.Hash, en.Flags.Encode()))
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "\n")
 }
