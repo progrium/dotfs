@@ -182,6 +182,21 @@ func TestPutUsesCommitHash(t *testing.T) {
 	}
 }
 
+// A ctl reply longer than the read buffer is read in pieces.
+func TestCtlReplyInPieces(t *testing.T) {
+	defer client.SetCtlBufSize(5)()
+	s := ninetest.New(t)
+	c := dial(t, s.Addr(), client.Options{Root: "home"})
+	data := []byte("pieces")
+	r, err := client.Put(ctx, c, "/a", fsproto.At(0), bytes.NewReader(data), int64(len(data)), client.PutOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Hash != fsproto.HashBytes(data) || r.Version == 0 {
+		t.Fatalf("reply %+v", r)
+	}
+}
+
 // writeN makes n changes (mkdir /d0 ... /dn-1) through c.
 func writeN(t *testing.T, c client.Conn, from, n int) {
 	for i := from; i < from+n; i++ {
