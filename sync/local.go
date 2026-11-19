@@ -101,7 +101,7 @@ func (e *Engine) hashFile(p string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	h, _, err := fsproto.HashReader(f)
+	h, _, err := hashReader(f)
 	return h, err
 }
 
@@ -227,8 +227,9 @@ func (e *Engine) writeTemp(r io.Reader) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	h := fsproto.NewB3()
-	if _, err := io.Copy(io.MultiWriter(f, h), readErrs{r}); err != nil {
+	h := getHasher()
+	defer putHasher(h)
+	if _, err := copyBuffered(io.MultiWriter(f, h), readErrs{r}); err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return "", "", err
@@ -237,7 +238,8 @@ func (e *Engine) writeTemp(r io.Reader) (string, string, error) {
 		os.Remove(f.Name())
 		return "", "", err
 	}
-	return f.Name(), fsproto.FormatHash(fsproto.HashB3, h.Sum(nil)), nil
+	var sum [32]byte
+	return f.Name(), fsproto.FormatHash(fsproto.HashB3, h.Sum(sum[:0])), nil
 }
 
 // readError marks a failure reading the source of a copy, as opposed to
