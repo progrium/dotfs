@@ -102,9 +102,14 @@ func (m *Meta) index(ctx context.Context, sc *scope, enc string) (cachedIndex, e
 	return ci, nil
 }
 
-// buildBody writes every entry of sc as index lines, from one snapshot.
+// buildBody writes every entry of sc as index lines, from one snapshot. It
+// fills fixed-size chunks and joins them once at the end, which is much
+// cheaper than growing one buffer for a multi-megabyte index.
 func (m *Meta) buildBody(ctx context.Context, sc *scope) (uint64, []byte, error) {
-	var b strings.Builder
+	const chunk = 1 << 20
+	var chunks [][]byte
+	cur := make([]byte, 0, chunk)
+	total := 0
 	var prev string
 	n := 0
 	seq, err := m.entries(ctx, sc, func(e fsproto.Entry) error {
@@ -113,12 +118,22 @@ func (m *Meta) buildBody(ctx context.Context, sc *scope) (uint64, []byte, error)
 		}
 		prev = e.Path
 		n++
-		b.WriteString(e.Encode())
-		b.WriteByte('\n')
+		line := e.Encode()
+		if len(cur)+len(line)+1 > cap(cur) {
+			chunks = append(chunks, cur)
+			cur = make([]byte, 0, max(chunk, len(line)+1))
+		}
+		cur = append(cur, line...)
+		cur = append(cur, '\n')
+		total += len(line) + 1
 		return nil
 	})
 	if err != nil {
 		return 0, nil, err
 	}
-	return seq, []byte(b.String()), nil
+	body := make([]byte, 0, total)
+	for _, c := range append(chunks, cur) {
+		body = append(body, c...)
+	}
+	return seq, body, nil
 }

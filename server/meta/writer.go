@@ -262,6 +262,7 @@ func (m *Meta) newScope(id int64, key server.Scope) *scope {
 
 // commitPlan makes p durable and visible. sc.mu is held.
 func (m *Meta) commitPlan(sc *scope, p *plan) error {
+	crash("prepared")
 	if len(p.FS) > 0 {
 		b, err := encodePlan(p)
 		if err != nil {
