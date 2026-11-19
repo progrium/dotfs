@@ -362,6 +362,13 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - The log keeps the last 100,000 changes of each scope by default; an older `since` gets `reset`.
 - A change is visible in `stat`, the index, and events only once its content is in place on disk, and a server restarted after a crash finishes any change it had recorded, so a version is never reused.
 
+**Conformance suite** (`dotfs conform`, package `conformance`)
+
+- The suite speaks 9P2000.L and expects `Rversion` to name exactly `9P2000.L`.
+- `.fs/` lists exactly the extension files that can be walked to; a name in it that is not an extension is not found.
+- A `Tflush` of a pending events read is answered only once the read is canceled or answered, and a canceled read takes no records from the stream, so the next read returns them.
+- Each events read returns whole records, each ending with a newline, and never more than the read's count. An index file and ctl replies are read at increasing offsets from 0 until a read returns no data.
+
 **Nested scopes (flag `i`)**
 
 - Setting flag `i` on a directory makes it a nested scope, starting at seq 0. Its children move there with version 0, and the parent's index, `stat`, and directory reads list only the directory itself.
