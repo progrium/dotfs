@@ -330,6 +330,16 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - `mkdir`, `cp`, and plain 9P changes (symlink creation, mode and mtime changes) are reported as `put` records. `cp` gives the destination the new seq and no flags; `commit` keeps the path's existing flags.
 - An events `since` before the log's retained range, or after the current seq, gets a `reset` record, which carries the current seq.
 
+**Client access patterns** (the reference client in package `client`; servers should accept these)
+
+- The attach name is the root's name. With hugelgupf/p9 the server walks it from the attacher's root, so a server can expose each user's roots as directories there.
+- ctl: a command is one `Twrite` at offset 0, without a trailing newline (servers also accept one). The reply is read from offset 0 and ends with a newline. A client reuses an open ctl fid for its next command, so each write replaces the fid's reply.
+- index: with `accept`, the client opens `.fs/index` for reading and writing and writes the accept line at offset 0; if the server refuses a write open, it reads the index plain. Reads use increasing offsets from 0.
+- events: the setup lines go in one write before the first read. Reads use increasing offsets, which a server may ignore. A zero-byte read before a `reset` record counts as a dropped stream, and the client reopens with `since`.
+- The p9 client cannot send `Tflush`, so a canceled events read stays pending on the server and its records are returned by the client's next read. Closing the stream clunks the fid; a server should end a pending read when its connection closes.
+- stage: the client walks to `.fs/stage/<name>` and opens it write-only, or creates it with `Tlcreate` when the walk fails. `Tgetattr` size is where a resumed upload continues.
+- WebSocket: the token goes in `Authorization: Bearer <token>` on the upgrade, and each 9P message is sent as one binary WebSocket message.
+
 **Not settled yet**
 
 - Nested scopes (flag `i`): the fakes treat a nested scope as an independent namespace and do not hide its children from the parent's index. The real metadata store and 9P server decide this.
