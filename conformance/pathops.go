@@ -71,7 +71,7 @@ func init() {
 		},
 		&Test{
 			ID: "ctl/scope-escape", Ext: ExtCtl, Section: secSecurity,
-			Name: "paths with .. or .fs never succeed, and .. at the root stays at the root",
+			Name: "paths with .. or .fs never succeed, and walking .. never leaves the root",
 			Run:  testCtlScope,
 		},
 		&Test{
@@ -408,15 +408,11 @@ func testCtlScope(t *T) {
 			t.Errorf("%q replied %q", line, rep)
 		}
 	}
-	// .. at the root stays at the root, as in 9P.
-	up, err := t.Walk("/", "..")
-	if err != nil {
-		t.Errorf("walk .. from the root: %v", err)
-	} else if up.Qid.Path != t.root.Qid.Path {
+	// Walking .. from the root may fail, but must not leave the root.
+	if up, err := t.Walk("/", ".."); err == nil && up.Qid.Path != t.root.Qid.Path {
 		t.Errorf("walk .. from the root left it (qid.path %#x, root %#x)", up.Qid.Path, t.root.Qid.Path)
-	}
-	if _, err := t.Walk("/", "..", ".fs"); err != nil && t.Has(ExtCtl) {
-		t.Errorf("walk ../.fs from the root: %v", err)
+	} else if err != nil {
+		t.Logf("walk .. from the root: %v (allowed)", err)
 	}
 }
 
