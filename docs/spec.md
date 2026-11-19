@@ -340,6 +340,11 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - stage: the client walks to `.fs/stage/<name>` and opens it write-only, or creates it with `Tlcreate` when the walk fails. `Tgetattr` size is where a resumed upload continues.
 - WebSocket: the token goes in `Authorization: Bearer <token>` on the upgrade, and each 9P message is sent as one binary WebSocket message.
 
+**Events**
+
+- A stream that falls more than its queue bound behind the newest change gets `<seq> reset` with the seq that overflowed it, which is the current seq, and the records it had not read are dropped. A stream still replaying history reads it at its own pace and is not reset for being slow, only if retention trims the log past it.
+- With `coalesce`, a record replaces an earlier unread record for the same path when nothing between them changes the tree's shape (a `mv`, a `del`, or a `put` of a directory). A `put` or `del` replaces a `put` or `flags`; a `flags` replaces a `flags`. A `mv` is never merged. The merged record keeps the later seq and position, so a client sees the latest state of the path and every record it depends on still comes first.
+
 **Not settled yet**
 
 - Nested scopes (flag `i`): the fakes treat a nested scope as an independent namespace and do not hide its children from the parent's index. The real metadata store and 9P server decide this.
