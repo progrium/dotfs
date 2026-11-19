@@ -28,6 +28,7 @@ func checkServerTree(t *testing.T, srv *Server, root string, want map[string]str
 }
 
 func TestServerCrashDuringCommits(t *testing.T) {
+	t.Parallel()
 	srv, a, b := pair(t)
 	a.Write("/seed.txt", "seed")
 	Converge(t, convergeTimeout, a, b)
@@ -77,6 +78,7 @@ func TestServerCrashDuringCommits(t *testing.T) {
 }
 
 func TestFlakyNetwork(t *testing.T) {
+	t.Parallel()
 	_, a, b := pair(t)
 	a.Proxy.SetDelay(20 * time.Millisecond)
 	b.Proxy.SetDelay(5 * time.Millisecond)
@@ -126,6 +128,7 @@ func TestFlakyNetwork(t *testing.T) {
 }
 
 func TestUploadResumesAfterCut(t *testing.T) {
+	t.Parallel()
 	_, a, b := pair(t)
 	Converge(t, convergeTimeout, a, b)
 	const size = 48 << 20
@@ -178,6 +181,7 @@ func resize(t *testing.T, dir, size string) {
 }
 
 func TestDiskFull(t *testing.T) {
+	t.Parallel()
 	needBinary(t)
 	data := t.TempDir()
 	tmpfs(t, data, "32m")
@@ -202,7 +206,7 @@ func TestDiskFull(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Write("/small-1.txt", "small")
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	if _, err := os.Stat(filepath.Join(b.Dir, "big.bin")); err == nil {
 		t.Fatal("big.bin reached b through a full disk")
 	}
@@ -222,7 +226,7 @@ func TestDiskFull(t *testing.T) {
 		a.Write(fmt.Sprintf("/small-%d.txt", i+2), "small")
 	}
 	b.Write("/from-b.txt", "b")
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	select {
 	case <-srv.p.done:
 		t.Fatalf("serve exited on a full disk")

@@ -24,6 +24,7 @@ func pair(t *testing.T, serveArgs ...string) (*Server, *Client, *Client) {
 }
 
 func TestBootstrapThreeClients(t *testing.T) {
+	t.Parallel()
 	srv, a, b := pair(t)
 	a.Write("/docs/readme.md", "hello")
 	a.Write("/docs/notes/2026.txt", "notes")
@@ -55,6 +56,7 @@ func TestBootstrapThreeClients(t *testing.T) {
 }
 
 func TestConcurrentEdit(t *testing.T) {
+	t.Parallel()
 	_, a, b := pair(t)
 	a.Write("/Documents/Tax 2025.pdf", "original")
 	Converge(t, convergeTimeout, a, b)
@@ -81,6 +83,7 @@ func TestConcurrentEdit(t *testing.T) {
 }
 
 func TestConcurrentEditBothOnline(t *testing.T) {
+	t.Parallel()
 	// Both clients online and editing at once: whichever commits second
 	// makes the one conflict copy, and nothing is lost.
 	_, a, b := pair(t)
@@ -109,6 +112,7 @@ func TestConcurrentEditBothOnline(t *testing.T) {
 }
 
 func TestEditVersusDelete(t *testing.T) {
+	t.Parallel()
 	_, a, b := pair(t)
 	a.Write("/edit-here.txt", "v1")
 	a.Write("/delete-here.txt", "v1")
@@ -135,6 +139,7 @@ func TestEditVersusDelete(t *testing.T) {
 }
 
 func TestRenameVersusEdit(t *testing.T) {
+	t.Parallel()
 	_, a, b := pair(t)
 	a.Write("/report.txt", "draft")
 	a.Write("/proj/src/main.go", "v1")
@@ -157,6 +162,7 @@ func TestRenameVersusEdit(t *testing.T) {
 }
 
 func TestLongOffline(t *testing.T) {
+	t.Parallel()
 	_, a, b := pair(t)
 	for i := range 20 {
 		a.Write(fmt.Sprintf("/shared/%02d.txt", i), "v1")
@@ -214,6 +220,7 @@ func TestLongOffline(t *testing.T) {
 }
 
 func TestResetBehindRetention(t *testing.T) {
+	t.Parallel()
 	// The server keeps only 50 changes; b misses 200.
 	_, a, b := pair(t, "-keep-log", "50")
 	a.Write("/stay.txt", "s")

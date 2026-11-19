@@ -63,15 +63,34 @@ func needBinary(t testing.TB) {
 	}
 }
 
-// freeAddr returns a loopback address with a port that was free a moment ago.
+// nextPort hands out ports below Linux's ephemeral range (32768 and up),
+// so a port given to one test's server is never also picked by the kernel
+// for another test's port-0 listener while the tests run in parallel. The
+// start is spread by process ID in case two test binaries run at once.
+var (
+	portMu   sync.Mutex
+	nextPort = 20000 + os.Getpid()%500*20
+)
+
+// freeAddr returns a loopback address with a port that is free and that no
+// other test in this process has been given.
 func freeAddr(t testing.TB) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	portMu.Lock()
+	defer portMu.Unlock()
+	for range 1000 {
+		nextPort++
+		if nextPort >= 32000 {
+			nextPort = 20000
+		}
+		addr := fmt.Sprintf("127.0.0.1:%d", nextPort)
+		if l, err := net.Listen("tcp", addr); err == nil {
+			l.Close()
+			return addr
+		}
 	}
-	defer l.Close()
-	return l.Addr().String()
+	t.Fatal("no free port")
+	return ""
 }
 
 // logBuf collects a process's output and keeps it for the test log.
@@ -260,6 +279,26 @@ func (c *Client) Once() error {
 	return cmd.Run()
 }
 
+// Goroutines ends a running sync process with SIGQUIT and returns the
+// goroutine dump the Go runtime prints, for diagnosing a stuck client.
+func (c *Client) Goroutines() string {
+	if c.p == nil {
+		return ""
+	}
+	select {
+	case <-c.p.done:
+		return ""
+	default:
+	}
+	before := len(c.out.String())
+	c.p.stop(syscall.SIGQUIT)
+	out := c.out.String()
+	if before > len(out) {
+		return ""
+	}
+	return out[before:]
+}
+
 // Stop stops the sync process cleanly.
 func (c *Client) Stop() { c.p.stop(syscall.SIGTERM) }
 
@@ -381,6 +420,11 @@ func Converge(t testing.TB, timeout time.Duration, cs ...*Client) map[string]str
 			var b strings.Builder
 			for i, c := range cs {
 				fmt.Fprintf(&b, "%s:\n%s\n", c.Name, show(trees[i]))
+			}
+			for _, c := range cs {
+				if st := c.Goroutines(); st != "" {
+					t.Logf("%s goroutines:\n%s", c.Name, st)
+				}
 			}
 			t.Fatalf("clients did not converge in %s:\n%s", timeout, b.String())
 		}

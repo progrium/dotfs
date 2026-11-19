@@ -65,6 +65,7 @@ func checkConform(t *testing.T, rep conformReport) {
 }
 
 func TestConformAgainstServe(t *testing.T) {
+	t.Parallel()
 	srv := NewServer(t)
 	checkConform(t, conform(t, srv, "conform", "-other-user", "other"))
 }
