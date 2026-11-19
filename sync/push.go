@@ -114,6 +114,9 @@ const (
 	batchMax   = 256
 	batchConns = 8
 	batchSize  = 4 << 20 // larger files go one at a time, with resumable stage names
+
+	// New files up to smallUpload bytes skip commit-hash (see sendFile).
+	smallUpload = 64 << 10
 )
 
 // batchItem is one file in a batch: what drain knew before sending it, and
@@ -401,15 +404,19 @@ type sent struct {
 // so several can run at once when persist is not.
 func (e *Engine) sendFile(ctx context.Context, q *qent, p string, base uint64, st lstat, h string, persist bool) sent {
 	mtime := st.mtime / 1e9
-	rep, err := e.ctl(ctx, fsproto.CommitHashCmd{Hash: h, Path: p, Base: fsproto.At(base), Mtime: mtime, Mode: st.mode})
-	if err != nil {
-		return sent{out: later, err: err}
-	}
-	switch rep.Status {
-	case fsproto.StatusOK:
-		return sent{out: pushed, ok: true, version: rep.Version}
-	case fsproto.StatusConflict, fsproto.StatusInvalid:
-		return sent{out: conflict}
+	// A new small file is uploaded straight away: commit-hash would
+	// almost always miss, and the upload costs little more than asking.
+	if base != 0 || st.size > smallUpload {
+		rep, err := e.ctl(ctx, fsproto.CommitHashCmd{Hash: h, Path: p, Base: fsproto.At(base), Mtime: mtime, Mode: st.mode})
+		if err != nil {
+			return sent{out: later, err: err}
+		}
+		switch rep.Status {
+		case fsproto.StatusOK:
+			return sent{out: pushed, ok: true, version: rep.Version}
+		case fsproto.StatusConflict, fsproto.StatusInvalid:
+			return sent{out: conflict}
+		}
 	}
 
 	// The server does not have the content: upload it.
@@ -451,7 +458,7 @@ func (e *Engine) sendFile(ctx context.Context, q *qent, p string, base uint64, s
 		res.touched = true
 		return done(later, err)
 	}
-	rep, err = e.ctl(ctx, fsproto.CommitCmd{Stage: q.Stage, Path: p, Base: fsproto.At(base), Mtime: mtime, Mode: st.mode, Hash: h})
+	rep, err := e.ctl(ctx, fsproto.CommitCmd{Stage: q.Stage, Path: p, Base: fsproto.At(base), Mtime: mtime, Mode: st.mode, Hash: h})
 	if err != nil {
 		return done(later, err)
 	}
