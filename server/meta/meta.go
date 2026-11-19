@@ -48,6 +48,8 @@ type Store interface {
 	PrepareSymlink(target string) (store.Prepared, error)
 	VerifyStage(user, name string) error
 	Place(p store.Prepared, r server.Root, path string) error
+	PlaceNoSync(p store.Prepared, r server.Root, path string) error
+	SyncDir(r server.Root, dir string) error
 	Discard(p store.Prepared) error
 	CleanTmp() error
 }
@@ -96,6 +98,8 @@ type scope struct {
 
 	// mu orders the scope's changes: it is the scope's writer.
 	mu       sync.Mutex
+	qmu      sync.Mutex // guards queue
+	queue    []*request // changes waiting for mu, oldest first
 	seq      atomic.Uint64
 	logStart atomic.Uint64
 	gone     bool            // merged back into its parent; guarded by mu

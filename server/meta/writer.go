@@ -61,15 +61,19 @@ type mutation struct {
 	Version uint64
 }
 
-func encodePlan(p *plan) ([]byte, error) {
+func encodeGob(v any) ([]byte, error) {
 	var b bytes.Buffer
-	err := gob.NewEncoder(&b).Encode(p)
+	err := gob.NewEncoder(&b).Encode(v)
 	return b.Bytes(), err
+}
+
+func decodeGob(b []byte, v any) error {
+	return gob.NewDecoder(bytes.NewReader(b)).Decode(v)
 }
 
 func decodePlan(b []byte) (*plan, error) {
 	var p plan
-	err := gob.NewDecoder(bytes.NewReader(b)).Decode(&p)
+	err := decodeGob(b, &p)
 	return &p, err
 }
 
@@ -127,8 +131,9 @@ type applied struct {
 }
 
 // apply applies p's metadata changes, logs it, sets the seq, and drops the
-// intent, in tx.
-func (m *Meta) apply(tx *sql.Tx, sc *scope, p *plan) (applied, error) {
+// intent, in tx. With trim set, it also trims the log if it has grown
+// enough; a group sets it for its last change only.
+func (m *Meta) apply(tx *sql.Tx, sc *scope, p *plan, trim bool) (applied, error) {
 	var out applied
 	for _, mu := range p.Muts {
 		switch mu.Kind {
@@ -171,7 +176,7 @@ func (m *Meta) apply(tx *sql.Tx, sc *scope, p *plan) (applied, error) {
 		return out, err
 	}
 	keep := m.opts.KeepLog
-	if start := sc.logStart.Load(); p.Seq > start+keep+keep/4 {
+	if start := sc.logStart.Load(); trim && p.Seq > start+keep+keep/4 {
 		if err := trimLog(tx, sc.id, p.Seq-keep); err != nil {
 			return out, err
 		}
@@ -260,58 +265,6 @@ func (m *Meta) newScope(id int64, key server.Scope) *scope {
 	return sc
 }
 
-// commitPlan makes p durable and visible. sc.mu is held.
-func (m *Meta) commitPlan(sc *scope, p *plan) error {
-	crash("prepared")
-	if len(p.FS) > 0 {
-		b, err := encodePlan(p)
-		if err != nil {
-			m.discard(p)
-			return err
-		}
-		if err := m.tx(func(tx *sql.Tx) error {
-			_, err := tx.Exec(`INSERT INTO intent (scope, plan) VALUES (?, ?)`, sc.id, b)
-			return err
-		}); err != nil {
-			m.discard(p)
-			return err
-		}
-		crash("intent")
-		for i, op := range p.FS {
-			if err := m.runFS(sc.key.Root, op, false); err != nil {
-				// Nothing is visible yet. Steps are atomic, so if this was
-				// the first one the change can simply be dropped.
-				if i == 0 {
-					if m.tx(func(tx *sql.Tx) error {
-						_, err := tx.Exec(`DELETE FROM intent WHERE scope = ?`, sc.id)
-						return err
-					}) == nil {
-						m.discard(p)
-						return err
-					}
-				}
-				sc.broken = err
-				return err
-			}
-		}
-		crash("fs")
-	}
-	var a applied
-	err := m.tx(func(tx *sql.Tx) (err error) {
-		a, err = m.apply(tx, sc, p)
-		return err
-	})
-	if err != nil {
-		if len(p.FS) > 0 {
-			sc.broken = err
-		}
-		return err
-	}
-	m.applied(sc, p, a)
-	crash("applied")
-	return nil
-}
-
 // applied updates memory after p's transaction committed.
 func (m *Meta) applied(sc *scope, p *plan, a applied) {
 	sc.seq.Store(p.Seq)
@@ -380,25 +333,35 @@ func (m *Meta) recover() error {
 	return nil
 }
 
-// redo finishes the change recorded in b.
+// redo finishes the changes recorded in the intent b, in order.
 func (m *Meta) redo(sc *scope, b []byte) error {
-	p, err := decodePlan(b)
+	ps, err := decodeIntent(b)
 	if err != nil {
 		return err
 	}
-	for _, op := range p.FS {
-		if err := m.runFS(sc.key.Root, op, true); err != nil {
-			return err
+	for _, p := range ps {
+		for _, op := range p.FS {
+			if err := m.runFS(sc.key.Root, op, true); err != nil {
+				return err
+			}
 		}
 	}
-	var a applied
-	if err := m.tx(func(tx *sql.Tx) (err error) {
-		a, err = m.apply(tx, sc, p)
-		return err
+	as := make([]applied, len(ps))
+	if err := m.tx(func(tx *sql.Tx) error {
+		for i := range ps {
+			a, err := m.apply(tx, sc, &ps[i], i == len(ps)-1)
+			if err != nil {
+				return err
+			}
+			as[i] = a
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
-	m.applied(sc, p, a)
+	for i := range ps {
+		m.applied(sc, &ps[i], as[i])
+	}
 	return nil
 }
 

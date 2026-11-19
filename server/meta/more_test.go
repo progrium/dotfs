@@ -296,12 +296,12 @@ type failingStore struct {
 	fail bool
 }
 
-func (f *failingStore) Place(p store.Prepared, r server.Root, path string) error {
+func (f *failingStore) PlaceNoSync(p store.Prepared, r server.Root, path string) error {
 	if f.fail {
 		f.fail = false
 		return errors.New("disk on fire")
 	}
-	return f.Store.Place(p, r, path)
+	return f.Store.PlaceNoSync(p, r, path)
 }
 
 func TestFailedPlace(t *testing.T) {

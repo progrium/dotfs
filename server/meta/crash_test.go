@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	gosync "sync"
 	"testing"
+	"time"
 
 	"github.com/progrium/dotfs/fsproto"
 	"github.com/progrium/dotfs/server"
@@ -117,6 +119,80 @@ var killOps = map[string]func(t testing.TB, st *store.Store, w server.Writer) (s
 	"nest": func(t testing.TB, st *store.Store, w server.Writer) (server.Result, error) {
 		return w.SetFlags(ctx, alice, fsproto.FlagsCmd{Path: "/d", Flags: "i"})
 	},
+	// group commits killGroupN changes together, one of which depends on
+	// another, plus one with a stale base that fails on its own.
+	"group": func(t testing.TB, st *store.Store, w server.Writer) (server.Result, error) {
+		stageData(t, st, "k1", "group one")
+		stageData(t, st, "k2", "group two")
+		stageData(t, st, "k3", "group three")
+		stageData(t, st, "k4", "stale")
+		rs := inGroup(t, w, []func() (server.Result, error){
+			func() (server.Result, error) {
+				return w.Commit(ctx, alice, fsproto.CommitCmd{Stage: "k1", Path: "/e/a", Base: fsproto.At(0), Mode: 0o644, Mtime: 20})
+			},
+			func() (server.Result, error) {
+				return w.Commit(ctx, alice, fsproto.CommitCmd{Stage: "k4", Path: "/d/f", Base: fsproto.At(1), Mode: 0o644, Mtime: 20})
+			},
+			func() (server.Result, error) { return w.Mkdir(ctx, alice, fsproto.MkdirCmd{Path: "/e/x"}) },
+			func() (server.Result, error) {
+				return w.Commit(ctx, alice, fsproto.CommitCmd{Stage: "k2", Path: "/e/x/b", Base: fsproto.At(0), Mode: 0o644, Mtime: 20})
+			},
+			func() (server.Result, error) {
+				return w.Commit(ctx, alice, fsproto.CommitCmd{Stage: "k3", Path: "/g", Base: fsproto.At(3), Mode: 0o644, Mtime: 20})
+			},
+			func() (server.Result, error) {
+				return w.CommitHash(ctx, alice, fsproto.CommitHashCmd{Hash: fsproto.HashBytes([]byte("one")), Path: "/e/x/h", Base: fsproto.At(0), Mode: 0o644, Mtime: 20})
+			},
+		})
+		for i, r := range rs {
+			if i == 1 {
+				if !errors.Is(r.err, fsproto.ErrConflict) {
+					t.Fatalf("stale base: %v, want a conflict", r.err)
+				}
+				continue
+			}
+			if r.err != nil {
+				return r.res, r.err
+			}
+		}
+		return rs[len(rs)-1].res, nil
+	},
+}
+
+// killGroupN is how many changes of the "group" kill op commit.
+const killGroupN = 5
+
+type result struct {
+	res server.Result
+	err error
+}
+
+// inGroup runs fns concurrently so that they queue for w's scope in order
+// and commit as one group, and returns their results.
+func inGroup(t testing.TB, w server.Writer, fns []func() (server.Result, error)) []result {
+	sc := w.(*writer).sc
+	sc.mu.Lock()
+	out := make([]result, len(fns))
+	var wg gosync.WaitGroup
+	for i, fn := range fns {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i].res, out[i].err = fn()
+		}()
+		for {
+			sc.qmu.Lock()
+			n := len(sc.queue)
+			sc.qmu.Unlock()
+			if n == i+1 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	sc.mu.Unlock()
+	wg.Wait()
+	return out
 }
 
 // TestKillHelper is the child process; it does nothing in a normal run.
@@ -144,7 +220,9 @@ func TestKill(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns processes")
 	}
-	steps := []string{"prepared", "intent", "fs", "applied"}
+	// "placed" stops after the first file is placed and before the
+	// directory sync, so in a group the rest are still in tmp.
+	steps := []string{"prepared", "intent", "placed", "fs", "applied"}
 	for op := range killOps {
 		for _, step := range steps {
 			t.Run(op+"/"+step, func(t *testing.T) {
@@ -162,6 +240,9 @@ func TestKill(t *testing.T) {
 					if err == nil && (step == "intent" || step == "fs") && op == "nest" {
 						return // the change has no filesystem step
 					}
+					if err == nil && step == "placed" {
+						return // the change places no file
+					}
 					t.Fatalf("child did not stop at %s: %v\n%s", step, err, out)
 				}
 
@@ -169,6 +250,9 @@ func TestKill(t *testing.T) {
 				defer m.Close()
 				defer st.Close()
 				want := uint64(killSetupSeq + 1)
+				if op == "group" {
+					want = killSetupSeq + killGroupN
+				}
 				if step == "prepared" {
 					want = killSetupSeq
 				}

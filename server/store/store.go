@@ -724,6 +724,15 @@ func (s *Store) PrepareSymlink(target string) (Prepared, error) {
 // assumes an earlier call already moved it and returns nil, so it can be
 // repeated after a crash.
 func (s *Store) Place(p Prepared, r server.Root, path string) error {
+	if err := s.PlaceNoSync(p, r, path); err != nil {
+		return err
+	}
+	return s.syncDir(s.full(r, fsproto.Parent(path)))
+}
+
+// PlaceNoSync is Place without the sync of path's directory, so that
+// several placements can share one; the caller then calls SyncDir.
+func (s *Store) PlaceNoSync(p Prepared, r server.Root, path string) error {
 	tp := s.tmpPath(p.Tmp)
 	if _, err := os.Lstat(tp); errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -735,10 +744,12 @@ func (s *Store) Place(p Prepared, r server.Root, path string) error {
 	if err := checkPlace(fr, path); err != nil {
 		return err
 	}
-	if err := os.Rename(tp, s.full(r, path)); err != nil {
-		return err
-	}
-	return s.syncDir(s.full(r, fsproto.Parent(path)))
+	return os.Rename(tp, s.full(r, path))
+}
+
+// SyncDir syncs the directory dir of root r to disk.
+func (s *Store) SyncDir(r server.Root, dir string) error {
+	return s.syncDir(s.full(r, dir))
 }
 
 // Discard removes prepared content that will not be placed.
