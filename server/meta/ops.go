@@ -366,6 +366,10 @@ func (c *change) putFile(old fsproto.Entry, p string, mode uint32, mtime, length
 }
 
 func (w *writer) Commit(ctx context.Context, o server.Origin, cmd fsproto.CommitCmd) (server.Result, error) {
+	// Hash and sync the stage file before taking the lock, so that other
+	// changes do not wait on it; PrepareStage reuses the result if nothing
+	// was written since, and otherwise does the work and reports any error.
+	w.m.st.VerifyStage(o.User, cmd.Stage)
 	return w.change(ctx, o, func(c *change) error {
 		old, err := c.fileTarget(cmd.Path, cmd.Base)
 		if err != nil {

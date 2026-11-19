@@ -243,6 +243,18 @@ type stageState struct {
 	sealed bool
 	h      hash.Hash // nil once out-of-order writes make it useless
 	hashed int64
+	writes uint64   // writes so far, so a verification can tell it is current
+	ver    verified // the last VerifyStage, if any
+}
+
+// verified is what VerifyStage found: the content's hash and size, synced
+// to disk, as of the stage's writes-th write.
+type verified struct {
+	ok     bool
+	file   fs.FileInfo // which file, in case the name was reused
+	writes uint64
+	size   int64
+	hash   string
 }
 
 // ErrSealed is returned by writes to a stage file that has been committed.
@@ -289,6 +301,7 @@ func (f *stageFile) WriteAt(p []byte, off int64) (int, error) {
 		return 0, ErrSealed
 	}
 	n, err := f.f.WriteAt(p, off)
+	st.writes++
 	if st.h != nil {
 		if off == st.hashed {
 			st.h.Write(p[:n])
@@ -512,24 +525,12 @@ func (s *Store) PrepareStage(user, name, hash string, mode uint32, mtime int64) 
 		return Prepared{}, err
 	}
 	size := fi.Size()
-	var got string
-	if st.h != nil && st.hashed == size {
-		got = fsproto.FormatHash(fsproto.HashB3, st.h.Sum(nil))
-	} else {
-		var n int64
-		got, n, err = fsproto.HashReader(io.NewSectionReader(f, 0, size))
-		if err != nil {
-			return Prepared{}, err
-		}
-		if n != size {
-			return Prepared{}, io.ErrUnexpectedEOF
-		}
+	got, err := s.verifyLocked(f, fi, st)
+	if err != nil {
+		return Prepared{}, err
 	}
 	if hash != "" && hash != got {
 		return Prepared{}, fsproto.Invalid("hash mismatch")
-	}
-	if err := s.syncFile(f); err != nil {
-		return Prepared{}, err
 	}
 	tmp := s.newTmp()
 	tp := s.tmpPath(tmp)
@@ -544,6 +545,77 @@ func (s *Store) PrepareStage(user, name, hash string, mode uint32, mtime int64) 
 		return Prepared{}, err
 	}
 	return Prepared{Tmp: tmp, Hash: got, Size: size}, nil
+}
+
+// verifyLocked returns the hash of the stage file f, whose size is size,
+// with its content synced to disk. It reuses a VerifyStage done since the
+// last write. st.mu is held.
+func (s *Store) verifyLocked(f *os.File, fi fs.FileInfo, st *stageState) (string, error) {
+	size := fi.Size()
+	if v := st.ver; v.ok && v.writes == st.writes && v.size == size && os.SameFile(v.file, fi) {
+		return v.hash, nil
+	}
+	var got string
+	if st.h != nil && st.hashed == size {
+		got = fsproto.FormatHash(fsproto.HashB3, st.h.Sum(nil))
+	} else {
+		h, n, err := fsproto.HashReader(io.NewSectionReader(f, 0, size))
+		if err != nil {
+			return "", err
+		}
+		if n != size {
+			return "", io.ErrUnexpectedEOF
+		}
+		got = h
+	}
+	if err := s.syncFile(f); err != nil {
+		return "", err
+	}
+	st.ver = verified{ok: true, file: fi, writes: st.writes, size: size, hash: got}
+	return got, nil
+}
+
+// VerifyStage hashes user's stage file and syncs it to disk ahead of a
+// commit, so that PrepareStage, which runs under the scope's lock, can skip
+// both when no write has landed since. It changes nothing a client can
+// see, and its errors can be ignored: PrepareStage then does the work
+// itself and reports them.
+func (s *Store) VerifyStage(user, name string) error {
+	if checkName(user) != nil || fsproto.CheckStageName(name) != nil {
+		return fsproto.Missing("no such stage")
+	}
+	k := stageKey{user, name}
+	sp := s.stagePath(user, name)
+	f, err := os.Open(sp)
+	if err != nil {
+		return mapErr(err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	st := s.stageState(k, fi.Size())
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.sealed {
+		return fsproto.Missing("stage already committed")
+	}
+	// A commit may have taken the file between Open and the lock, leaving
+	// st new; then there is nothing to verify, and st must not linger.
+	if now, err := os.Lstat(sp); err != nil || !os.SameFile(now, fi) {
+		s.mu.Lock()
+		if s.stages[k] == st {
+			delete(s.stages, k)
+		}
+		s.mu.Unlock()
+		return fsproto.Missing("no such stage")
+	}
+	if fi, err = f.Stat(); err != nil {
+		return err
+	}
+	_, err = s.verifyLocked(f, fi, st)
+	return err
 }
 
 // PrepareHash links content user already holds into tmp, with mode and

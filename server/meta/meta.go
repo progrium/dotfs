@@ -46,6 +46,7 @@ type Store interface {
 	PrepareHash(user, hash string, mode uint32, mtime int64) (store.Prepared, error)
 	PrepareCopy(r server.Root, from string) (store.Prepared, error)
 	PrepareSymlink(target string) (store.Prepared, error)
+	VerifyStage(user, name string) error
 	Place(p store.Prepared, r server.Root, path string) error
 	Discard(p store.Prepared) error
 	CleanTmp() error
