@@ -345,6 +345,15 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - A stream that falls more than its queue bound behind the newest change gets `<seq> reset` with the seq that overflowed it, which is the current seq, and the records it had not read are dropped. A stream still replaying history reads it at its own pace and is not reset for being slow, only if retention trims the log past it.
 - With `coalesce`, a record replaces an earlier unread record for the same path when nothing between them changes the tree's shape (a `mv`, a `del`, or a `put` of a directory). A `put` or `del` replaces a `put` or `flags`; a `flags` replaces a `flags`. A `mv` is never merged. The merged record keeps the later seq and position, so a client sees the latest state of the path and every record it depends on still comes first.
 
+**Sync client** (`dotfs sync`, package `sync`)
+
+- Conflict copies are named `name.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.ext` with the time in UTC. The extension is the text from the last dot, unless that dot starts the name, so `.bashrc` becomes `.bashrc.sync-conflict-…-<device>`. If that name is taken, `-2`, `-3`, and so on follow the device.
+- A change on both sides to the same content (same hash and mode, or both directories) is not a conflict.
+- A remote `del` or `mv` of a directory removes or moves only what is unchanged locally; files edited or created locally under it are committed again, as new files, under the old path or the new one.
+- A local rename is sent as `mv` with the source's base and a destination base of `0` when the client can tell it is one (same inode, or else a unique hash match). A local delete of a directory is sent as conditional `rm` of each path, deepest first, never `rmtree`, so an edit made on the server meanwhile is not lost.
+- The ignore file is `.dotfsignore` at the top of the root, synced like any file. Ignored paths are neither sent nor received. Built in: `/.dotfs`, any `.fs`, `.DS_Store`, `Thumbs.db`, `desktop.ini`, `*.swp`, `*.swo`, `*.swx`, `*~`, `.#*`, `#*#`, `~$*`, and `.~lock.*#`.
+- Symlinks are received but not sent, since no ctl command creates one. Directory modes and mtimes are not sent.
+
 **Storage** (server packages `server/store` and `server/meta`)
 
 - `commit-hash` looks at every root of the attaching user, and only at content that is still published at some path in one of them. Content another user holds, or that was deleted, is `missing`.
