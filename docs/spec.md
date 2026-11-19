@@ -345,6 +345,17 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - A stream that falls more than its queue bound behind the newest change gets `<seq> reset` with the seq that overflowed it, which is the current seq, and the records it had not read are dropped. A stream still replaying history reads it at its own pace and is not reset for being slow, only if retention trims the log past it.
 - With `coalesce`, a record replaces an earlier unread record for the same path when nothing between them changes the tree's shape (a `mv`, a `del`, or a `put` of a directory). A `put` or `del` replaces a `put` or `flags`; a `flags` replaces a `flags`. A `mv` is never merged. The merged record keeps the later seq and position, so a client sees the latest state of the path and every record it depends on still comes first.
 
-**Not settled yet**
+**Storage** (server packages `server/store` and `server/meta`)
 
-- Nested scopes (flag `i`): the fakes treat a nested scope as an independent namespace and do not hide its children from the parent's index. The real metadata store and 9P server decide this.
+- `commit-hash` looks at every root of the attaching user, and only at content that is still published at some path in one of them. Content another user holds, or that was deleted, is `missing`.
+- Once a `commit` has taken a stage file, further writes through fids still open on it fail with a 9P error, so published content always matches its hash.
+- The log keeps the last 100,000 changes of each scope by default; an older `since` gets `reset`.
+- A change is visible in `stat`, the index, and events only once its content is in place on disk, and a server restarted after a crash finishes any change it had recorded, so a version is never reused.
+
+**Nested scopes (flag `i`)**
+
+- Setting flag `i` on a directory makes it a nested scope, starting at seq 0. Its children move there with version 0, and the parent's index, `stat`, and directory reads list only the directory itself.
+- The parent rejects with `invalid` any change below a nested directory, and `rm`, `rmtree`, or `mv` of a directory that is or holds one. Flag `i` on a scope root is `invalid`.
+- Clearing flag `i` merges the children back into the parent, each with the version of that `flags` change, and ends the nested scope and its log. A nested scope that holds another nested scope cannot be merged (`invalid`).
+- Both are one `flags` record in the parent. A client that mirrors the parent and sees `i` added or removed re-reads what moved: the nested index, or the parent's.
+- The in-memory fakes in `server/fake` do not implement this: they treat a nested scope as an independent namespace and do not hide its children from the parent.
