@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	gosync "sync"
 
 	"github.com/progrium/dotfs/client"
 	"github.com/progrium/dotfs/fsproto"
@@ -26,16 +27,14 @@ const (
 
 // drain pushes the queue to the server in dependency order. A conflict
 // makes it catch up on events, which settles the conflict locally, and go
-// round again.
+// round again. Runs of new or edited small files are sent several at a
+// time (see sendBatch); everything else goes one entry at a time.
 func (e *Engine) drain(ctx context.Context) error {
 	for round := 0; e.st.queueLen() > 0; round++ {
 		items := e.ordered()
 		conflicts := 0
-		for _, q := range items {
-			if !e.queued(q) {
-				continue // settled by catching up
-			}
-			out, err := e.push(ctx, q)
+		// handle records one entry's outcome.
+		handle := func(q *qent, out outcome, err error) error {
 			if err != nil {
 				if isConnErr(err) {
 					return err
@@ -65,7 +64,38 @@ func (e *Engine) drain(ctx context.Context) error {
 					}
 				}
 			}
-			if err := e.st.flush(); err != nil {
+			return e.st.flush()
+		}
+		for i := 0; i < len(items); {
+			if batch := e.batchable(items[i:]); len(batch) > 1 {
+				i += len(batch)
+				// Record every commit first, so a conflict's catching up
+				// recognizes the batch's own changes.
+				e.sendBatch(ctx, batch)
+				for _, b := range batch {
+					b.res.out, b.res.err = e.applySend(b.q, b.q.Path, b.flags, b.st, b.h, b.res)
+				}
+				for _, b := range batch {
+					if !e.queued(b.q) {
+						continue
+					}
+					out, err := b.res.out, b.res.err
+					if b.redo {
+						out, err = e.push(ctx, b.q)
+					}
+					if err := handle(b.q, out, err); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			q := items[i]
+			i++
+			if !e.queued(q) {
+				continue // settled by catching up
+			}
+			out, err := e.push(ctx, q)
+			if err := handle(q, out, err); err != nil {
 				return err
 			}
 		}
@@ -77,6 +107,93 @@ func (e *Engine) drain(ctx context.Context) error {
 		return e.afterRemote(ctx)
 	}
 	return nil
+}
+
+// Batches of small files are sent with this many in flight.
+const (
+	batchMax   = 256
+	batchConns = 8
+	batchSize  = 4 << 20 // larger files go one at a time, with resumable stage names
+)
+
+// batchItem is one file in a batch: what drain knew before sending it, and
+// what sending did.
+type batchItem struct {
+	q     *qent
+	base  uint64
+	flags fsproto.Flags
+	row   *row
+	st    lstat
+	h     string
+	res   sent
+	redo  bool // not sent; push it on its own
+}
+
+// batchable returns the run of entries at the start of items that can be
+// sent at once: syncs of regular files no bigger than batchSize, whose
+// parent the server already has, that are not clean.
+func (e *Engine) batchable(items []*qent) []*batchItem {
+	var out []*batchItem
+	for _, q := range items {
+		if len(out) == batchMax || q.Op != opSync || !e.queued(q) {
+			break
+		}
+		r := e.st.get(q.Path)
+		if r != nil && r.Type != fsproto.TypeFile || e.excluded(q.Path, false) {
+			break
+		}
+		if par := fsproto.Parent(q.Path); par != "/" {
+			if pr := e.st.get(par); pr == nil || pr.Type != fsproto.TypeDir {
+				break
+			}
+		}
+		st, err := e.stat(q.Path)
+		if err != nil || !st.exists || st.typ != fsproto.TypeFile || st.size > batchSize || r != nil && quickClean(r, st) {
+			break
+		}
+		b := &batchItem{q: q, row: r, st: st}
+		if r != nil {
+			b.base, b.flags = r.Version, r.Flags
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// sendBatch hashes and sends the batch's files with batchConns in flight.
+// It reads the engine's state but does not change it; drain records the
+// results in order afterwards.
+func (e *Engine) sendBatch(ctx context.Context, batch []*batchItem) {
+	work := make(chan *batchItem)
+	var wg gosync.WaitGroup
+	for range min(batchConns, len(batch)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for b := range work {
+				h, err := e.hashFile(b.q.Path)
+				if err != nil {
+					b.res = sent{out: later, err: err}
+					continue
+				}
+				if b.row != nil && h == b.row.Hash && b.st.mode == b.row.Mode {
+					b.redo = true // touched, not changed: push records the new stat
+					continue
+				}
+				if now, err := e.stat(b.q.Path); err != nil || now != b.st {
+					b.res = sent{out: later, err: err} // still being written
+					continue
+				}
+				b.h = h
+				b.res = e.sendFile(ctx, b.q, b.q.Path, b.base, b.st, h, false)
+			}
+		}()
+	}
+	for _, b := range batch {
+		work <- b
+	}
+	close(work)
+	wg.Wait()
 }
 
 func (e *Engine) queued(q *qent) bool { return e.st.queued(q) }
@@ -265,77 +382,125 @@ func (e *Engine) pushFile(ctx context.Context, q *qent, p string, r *row, st lst
 	if r != nil {
 		base, flags = r.Version, r.Flags
 	}
+	res := e.sendFile(ctx, q, p, base, st, h, true)
+	return e.applySend(q, p, flags, st, h, res)
+}
+
+// sent is what sendFile did, for applySend to record.
+type sent struct {
+	out     outcome
+	err     error
+	version uint64 // the committed version, when ok
+	ok      bool   // committed
+	touched bool   // q's stage fields changed
+}
+
+// sendFile commits p's content h at base, by hash or through q's stage
+// file. It talks only to the server and never touches the engine's state,
+// except to flush q's new stage name before an upload when persist is set,
+// so several can run at once when persist is not.
+func (e *Engine) sendFile(ctx context.Context, q *qent, p string, base uint64, st lstat, h string, persist bool) sent {
 	mtime := st.mtime / 1e9
 	rep, err := e.ctl(ctx, fsproto.CommitHashCmd{Hash: h, Path: p, Base: fsproto.At(base), Mtime: mtime, Mode: st.mode})
 	if err != nil {
-		return later, err
+		return sent{out: later, err: err}
 	}
 	switch rep.Status {
 	case fsproto.StatusOK:
-		e.committed(p, h, flags, rep.Version, st)
-		return pushed, nil
+		return sent{out: pushed, ok: true, version: rep.Version}
 	case fsproto.StatusConflict, fsproto.StatusInvalid:
-		return conflict, nil
+		return sent{out: conflict}
 	}
 
 	// The server does not have the content: upload it.
+	var res sent
 	if q.Stage != "" && q.SHash != h {
-		e.abort(ctx, q)
+		e.abortStage(ctx, q)
+		res.touched = true
 	}
 	if q.Stage == "" {
 		q.Stage, q.SHash = "sync-"+randomID(), h
-		e.st.touchQueue(q)
-		if err := e.st.flush(); err != nil {
-			return later, err
+		res.touched = true
+		if persist {
+			e.st.touchQueue(q)
+			if err := e.st.flush(); err != nil {
+				res.out, res.err = later, err
+				return res
+			}
 		}
+	}
+	done := func(out outcome, err error) sent {
+		res.out, res.err = out, err
+		return res
 	}
 	f, err := os.Open(e.osPath(p))
 	if err != nil {
-		return later, err
+		return done(later, err)
 	}
 	_, err = client.Upload(ctx, e.conn, q.Stage, f, st.size)
 	f.Close()
 	if err != nil {
 		if localErr(err) {
-			return later, err
+			return done(later, err)
 		}
-		return later, cerr(err)
+		return done(later, cerr(err))
 	}
 	if now, err := e.stat(p); err != nil || now != st {
 		// Still being written; the next scan commits the final content.
-		e.abort(ctx, q)
-		return later, err
+		e.abortStage(ctx, q)
+		res.touched = true
+		return done(later, err)
 	}
 	rep, err = e.ctl(ctx, fsproto.CommitCmd{Stage: q.Stage, Path: p, Base: fsproto.At(base), Mtime: mtime, Mode: st.mode, Hash: h})
 	if err != nil {
-		return later, err
+		return done(later, err)
 	}
 	switch rep.Status {
 	case fsproto.StatusOK:
 		q.Stage, q.SHash = "", ""
-		e.st.touchQueue(q)
-		e.committed(p, h, flags, rep.Version, st)
-		return pushed, nil
+		res.touched, res.ok, res.version = true, true, rep.Version
+		return done(pushed, nil)
 	case fsproto.StatusConflict:
-		e.abort(ctx, q)
-		return conflict, nil
+		e.abortStage(ctx, q)
+		res.touched = true
+		return done(conflict, nil)
 	case fsproto.StatusMissing:
 		// The stage file expired, or the parent directory is gone.
 		q.Stage, q.SHash = "", ""
-		e.st.touchQueue(q)
-		return conflict, nil
+		res.touched = true
+		return done(conflict, nil)
 	}
-	e.abort(ctx, q)
-	return later, fmt.Errorf("commit: %w", rep.Err())
+	e.abortStage(ctx, q)
+	res.touched = true
+	return done(later, fmt.Errorf("commit: %w", rep.Err()))
+}
+
+// applySend records what sendFile did in the engine's state.
+func (e *Engine) applySend(q *qent, p string, flags fsproto.Flags, st lstat, h string, res sent) (outcome, error) {
+	if res.touched {
+		e.st.touchQueue(q)
+	}
+	if res.ok {
+		e.committed(p, h, flags, res.version, st)
+	}
+	return res.out, res.err
 }
 
 func (e *Engine) abort(ctx context.Context, q *qent) {
 	if q.Stage == "" {
 		return
 	}
+	e.abortStage(ctx, q)
+	e.st.touchQueue(q)
+}
+
+// abortStage removes q's stage file on the server and forgets it.
+func (e *Engine) abortStage(ctx context.Context, q *qent) {
+	if q.Stage == "" {
+		return
+	}
 	e.ctl(ctx, fsproto.AbortCmd{Stage: q.Stage})
 	q.Stage, q.SHash = "", ""
-	e.st.touchQueue(q)
 }
 
 // committed records a successful commit of p as its new base.
