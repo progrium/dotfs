@@ -147,12 +147,7 @@ CREATE TABLE IF NOT EXISTS index_cache (
 	bytes BLOB NOT NULL,
 	PRIMARY KEY (scope, encoding)
 );
-CREATE TABLE IF NOT EXISTS token (
-	hash TEXT PRIMARY KEY,
-	user TEXT NOT NULL,
-	created INTEGER NOT NULL
-);
-`
+` + tokenSchema
 
 func dsn(path string, sync string, readOnly bool) string {
 	q := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(" + sync + ")"

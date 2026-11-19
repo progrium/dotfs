@@ -1,6 +1,7 @@
 package meta_test
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -33,4 +34,24 @@ func TestTokens(t *testing.T) {
 	_, m := open(t, t.TempDir(), nil, false)
 	defer m.Close()
 	servertest.TestTokens(t, func(t *testing.T) server.Tokens { return m })
+}
+
+func TestOpenTokens(t *testing.T) {
+	dir := t.TempDir()
+	_, m := open(t, dir, nil, false)
+	defer m.Close()
+	// A separate opener works beside a running Meta and sees its tokens.
+	tk, err := meta.OpenTokens(filepath.Join(dir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tk.Close()
+	servertest.TestTokens(t, func(t *testing.T) server.Tokens { return tk })
+	tok, err := tk.CreateToken(context.Background(), "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, err := m.LookupToken(context.Background(), tok); err != nil || u != "bob" {
+		t.Fatalf("Meta.LookupToken = %q %v", u, err)
+	}
 }
