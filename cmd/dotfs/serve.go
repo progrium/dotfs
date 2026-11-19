@@ -38,6 +38,7 @@ func init() {
 		createRoots := fl.Bool("create-roots", true, "create a missing root when its owner attaches")
 		stageTTL := fl.Duration("stage-ttl", 24*time.Hour, "remove stage files not written for this long (at least 1h)")
 		noDedupe := fl.Bool("no-dedupe", false, "turn off hard-link dedupe")
+		keepLog := fl.Uint64("keep-log", 0, "changes each scope's log keeps; older `since` values get reset (0: 100,000)")
 		if err := fl.Parse(args); err != nil {
 			return err
 		}
@@ -61,7 +62,7 @@ func init() {
 			return err
 		}
 		defer st.Close()
-		m, err := meta.Open(filepath.Join(*data, "meta.db"), st, nil, nil)
+		m, err := meta.Open(filepath.Join(*data, "meta.db"), st, nil, &meta.Options{KeepLog: *keepLog})
 		if err != nil {
 			return err
 		}
