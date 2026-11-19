@@ -304,7 +304,7 @@ func (e *Engine) reloadIgnores() error {
 	for _, p := range drop {
 		e.st.del(p)
 	}
-	for _, q := range append([]*qent(nil), e.st.queue...) {
+	for _, q := range append([]*qent(nil), e.st.pending()...) {
 		if e.ign.Ignored(q.Path, false) || q.To != "" && e.ign.Ignored(q.To, false) {
 			e.st.dequeue(q)
 		}

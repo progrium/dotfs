@@ -28,7 +28,7 @@ const (
 // makes it catch up on events, which settles the conflict locally, and go
 // round again.
 func (e *Engine) drain(ctx context.Context) error {
-	for round := 0; len(e.st.queue) > 0; round++ {
+	for round := 0; e.st.queueLen() > 0; round++ {
 		items := e.ordered()
 		conflicts := 0
 		for _, q := range items {
@@ -58,7 +58,7 @@ func (e *Engine) drain(ctx context.Context) error {
 			case later:
 				if e.queued(q) {
 					q.Tries++
-					e.st.touchQueue()
+					e.st.touchQueue(q)
 					if q.Tries >= maxTries {
 						e.logf("giving up on %s %s for now", q.Op, q.Path)
 						e.st.dequeue(q)
@@ -79,14 +79,7 @@ func (e *Engine) drain(ctx context.Context) error {
 	return nil
 }
 
-func (e *Engine) queued(q *qent) bool {
-	for _, x := range e.st.queue {
-		if x == q {
-			return true
-		}
-	}
-	return false
-}
+func (e *Engine) queued(q *qent) bool { return e.st.queued(q) }
 
 // ordered returns the queue sorted so that each change finds what it needs
 // on the server: new directories (shallowest first), renames, files, then
@@ -97,8 +90,9 @@ func (e *Engine) ordered() []*qent {
 		class int
 		depth int
 	}
-	items := make([]item, 0, len(e.st.queue))
-	for _, q := range e.st.queue {
+	pending := e.st.pending()
+	items := make([]item, 0, len(pending))
+	for _, q := range pending {
 		it := item{q: q, class: 2, depth: depth(q.Path)}
 		if q.Op == opMv {
 			it.class, it.depth = 1, depth(q.To)
@@ -290,7 +284,7 @@ func (e *Engine) pushFile(ctx context.Context, q *qent, p string, r *row, st lst
 	}
 	if q.Stage == "" {
 		q.Stage, q.SHash = "sync-"+randomID(), h
-		e.st.touchQueue()
+		e.st.touchQueue(q)
 		if err := e.st.flush(); err != nil {
 			return later, err
 		}
@@ -319,7 +313,7 @@ func (e *Engine) pushFile(ctx context.Context, q *qent, p string, r *row, st lst
 	switch rep.Status {
 	case fsproto.StatusOK:
 		q.Stage, q.SHash = "", ""
-		e.st.touchQueue()
+		e.st.touchQueue(q)
 		e.committed(p, h, flags, rep.Version, st)
 		return pushed, nil
 	case fsproto.StatusConflict:
@@ -328,7 +322,7 @@ func (e *Engine) pushFile(ctx context.Context, q *qent, p string, r *row, st lst
 	case fsproto.StatusMissing:
 		// The stage file expired, or the parent directory is gone.
 		q.Stage, q.SHash = "", ""
-		e.st.touchQueue()
+		e.st.touchQueue(q)
 		return conflict, nil
 	}
 	e.abort(ctx, q)
@@ -341,7 +335,7 @@ func (e *Engine) abort(ctx context.Context, q *qent) {
 	}
 	e.ctl(ctx, fsproto.AbortCmd{Stage: q.Stage})
 	q.Stage, q.SHash = "", ""
-	e.st.touchQueue()
+	e.st.touchQueue(q)
 }
 
 // committed records a successful commit of p as its new base.

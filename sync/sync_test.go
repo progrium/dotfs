@@ -234,8 +234,8 @@ func (w *world) converge(nodes ...*node) map[string]string {
 		if got := n.tree(); !maps.Equal(got, want) {
 			w.t.Fatalf("%s differs from the server\n%s:\n%sserver:\n%s", n.name, n.name, show(got), show(want))
 		}
-		if len(n.e.st.queue) != 0 {
-			w.t.Fatalf("%s: queue not empty: %+v", n.name, n.e.st.queue[0])
+		if q := n.e.st.pending(); len(q) != 0 {
+			w.t.Fatalf("%s: queue not empty: %+v", n.name, q[0])
 		}
 	}
 	return want
@@ -489,7 +489,7 @@ func TestLongOffline(t *testing.T) {
 	// Local changes keep queueing while offline, and survive a restart.
 	b.e.Sync(context.Background())
 	b.restart()
-	if len(b.e.st.queue) == 0 {
+	if b.e.st.queueLen() == 0 {
 		t.Fatal("offline changes were not queued")
 	}
 	b.setOnline(true)

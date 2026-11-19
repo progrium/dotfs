@@ -413,7 +413,7 @@ func (e *Engine) applyFlags(p string, flags fsproto.Flags, seq uint64) {
 		for _, k := range kids[1:] {
 			e.st.del(k)
 		}
-		for _, q := range append([]*qent(nil), e.st.queue...) {
+		for _, q := range append([]*qent(nil), e.st.pending()...) {
 			if q.Path != p && fsproto.Within(q.Path, p) || q.To != "" && q.To != p && fsproto.Within(q.To, p) {
 				e.st.dequeue(q)
 			}

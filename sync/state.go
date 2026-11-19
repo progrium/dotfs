@@ -41,7 +41,12 @@ type qent struct {
 	Stage string // stage name of an upload in progress
 	SHash string // content hash the stage file holds
 	Tries int
+
+	dead bool // dequeued; dropped from state.queue at the next compaction
 }
+
+// qkey identifies equal queue entries.
+type qkey struct{ op, path, to string }
 
 // state is the engine's local state: rows and the queue in memory, written
 // through to <dir>/.dotfs/state.db by flush.
@@ -51,14 +56,21 @@ type state struct {
 	rows   map[string]*row
 	kids   map[string]map[string]struct{} // parent path -> child paths with rows
 	hashes map[string]map[string]struct{} // content hash -> file paths with rows
-	queue  []*qent
+	queue  []*qent                        // in ID order; may hold dead entries, so read it through pending
 	seq    uint64
 	meta   map[string]string
 
-	dirtyRows  map[string]struct{}
-	dirtyQueue bool
-	dirtyMeta  bool
-	nextID     int64
+	dirtyRows map[string]struct{}
+	// The queue's indexes, so enqueue, dequeue, and lookups do not scan it.
+	qkeys map[qkey]*qent
+	mvs   map[string]map[*qent]struct{} // opMv entries by source path
+	ndead int
+	qdups int // entries whose key another live entry holds in qkeys
+
+	dirtyQ    map[*qent]struct{} // entries to write
+	deletedQ  []int64            // entry IDs to delete
+	dirtyMeta bool
+	nextID    int64
 }
 
 const schema = `
@@ -101,6 +113,9 @@ func openState(dir string) (*state, error) {
 		hashes:    map[string]map[string]struct{}{},
 		meta:      map[string]string{},
 		dirtyRows: map[string]struct{}{},
+		qkeys:     map[qkey]*qent{},
+		mvs:       map[string]map[*qent]struct{}{},
+		dirtyQ:    map[*qent]struct{}{},
 	}
 	if err := s.load(); err != nil {
 		db.Close()
@@ -161,7 +176,7 @@ func (s *state) load() error {
 			rs.Close()
 			return err
 		}
-		s.queue = append(s.queue, q)
+		s.add(q)
 		s.nextID = max(s.nextID, q.ID)
 	}
 	rs.Close()
@@ -300,14 +315,19 @@ func (s *state) rebase(from, to string, v uint64) {
 	for _, r := range moved {
 		s.put(r)
 	}
-	for _, q := range s.queue {
+	for _, q := range s.pending() {
+		np, nto := q.Path, q.To
 		if fsproto.Within(q.Path, from) {
-			q.Path = fsproto.Rebase(q.Path, from, to)
-			s.dirtyQueue = true
+			np = fsproto.Rebase(q.Path, from, to)
 		}
 		if q.To != "" && fsproto.Within(q.To, from) {
-			q.To = fsproto.Rebase(q.To, from, to)
-			s.dirtyQueue = true
+			nto = fsproto.Rebase(q.To, from, to)
+		}
+		if np != q.Path || nto != q.To {
+			s.unindex(q)
+			q.Path, q.To = np, nto
+			s.index(q)
+			s.touchQueue(q)
 		}
 	}
 }
@@ -315,43 +335,128 @@ func (s *state) rebase(from, to string, v uint64) {
 // enqueue adds a queue entry unless an equal one is pending, and returns
 // the pending entry.
 func (s *state) enqueue(op, p, to string) *qent {
-	for _, q := range s.queue {
-		if q.Op == op && q.Path == p && q.To == to {
-			return q
-		}
+	if q := s.qkeys[qkey{op, p, to}]; q != nil {
+		return q
 	}
 	s.nextID++
 	q := &qent{ID: s.nextID, Op: op, Path: p, To: to}
-	s.queue = append(s.queue, q)
-	s.dirtyQueue = true
+	s.add(q)
+	s.touchQueue(q)
 	return q
 }
 
-func (s *state) dequeue(q *qent) {
-	for i, x := range s.queue {
-		if x == q {
-			s.queue = append(s.queue[:i], s.queue[i+1:]...)
-			s.dirtyQueue = true
+// add appends q, which has the highest ID so far, and indexes it.
+func (s *state) add(q *qent) {
+	s.queue = append(s.queue, q)
+	s.index(q)
+}
+
+func (s *state) index(q *qent) {
+	k := qkey{q.Op, q.Path, q.To}
+	if s.qkeys[k] == nil {
+		s.qkeys[k] = q
+	} else if s.qkeys[k] != q {
+		s.qdups++
+	}
+	if q.Op == opMv {
+		m := s.mvs[q.Path]
+		if m == nil {
+			m = map[*qent]struct{}{}
+			s.mvs[q.Path] = m
+		}
+		m[q] = struct{}{}
+	}
+}
+
+func (s *state) unindex(q *qent) {
+	k := qkey{q.Op, q.Path, q.To}
+	if s.qkeys[k] == q {
+		delete(s.qkeys, k)
+		if s.qdups == 0 {
+			s.unindexMv(q)
 			return
 		}
+		// Another live entry with the same key (possible after a rebase)
+		// takes its place.
+		for _, x := range s.queue {
+			if x != q && !x.dead && x.Op == q.Op && x.Path == q.Path && x.To == q.To {
+				s.qkeys[k] = x
+				s.qdups--
+				break
+			}
+		}
+	} else if s.qkeys[k] != nil {
+		s.qdups--
 	}
+	s.unindexMv(q)
 }
 
-// pendingMv returns the queued local rename of p, if any.
-func (s *state) pendingMv(p string) *qent {
-	for _, q := range s.queue {
-		if q.Op == opMv && q.Path == p {
-			return q
+func (s *state) unindexMv(q *qent) {
+	if q.Op == opMv {
+		if m := s.mvs[q.Path]; m != nil {
+			delete(m, q)
+			if len(m) == 0 {
+				delete(s.mvs, q.Path)
+			}
 		}
 	}
-	return nil
 }
 
-func (s *state) touchQueue() { s.dirtyQueue = true }
+func (s *state) dequeue(q *qent) {
+	if q.dead {
+		return
+	}
+	s.unindex(q)
+	q.dead = true
+	s.ndead++
+	delete(s.dirtyQ, q)
+	s.deletedQ = append(s.deletedQ, q.ID)
+}
+
+// queued reports whether q is still pending. Entries are only ever made
+// by add, so one that is not dead is in the queue.
+func (s *state) queued(q *qent) bool { return !q.dead }
+
+// pending returns the live queue entries in ID order. The slice is the
+// state's own; dequeueing while ranging over it is safe, since entries are
+// only marked dead until the next call.
+func (s *state) pending() []*qent {
+	if s.ndead > 0 {
+		live := make([]*qent, 0, len(s.queue)-s.ndead)
+		for _, q := range s.queue {
+			if !q.dead {
+				live = append(live, q)
+			}
+		}
+		s.queue, s.ndead = live, 0
+	}
+	return s.queue
+}
+
+// queueLen is the number of live queue entries.
+func (s *state) queueLen() int { return len(s.queue) - s.ndead }
+
+// pendingMv returns the queued local rename of p, if any, the oldest first.
+func (s *state) pendingMv(p string) *qent {
+	var best *qent
+	for q := range s.mvs[p] {
+		if best == nil || q.ID < best.ID {
+			best = q
+		}
+	}
+	return best
+}
+
+// touchQueue marks q to be written at the next flush.
+func (s *state) touchQueue(q *qent) {
+	if !q.dead {
+		s.dirtyQ[q] = struct{}{}
+	}
+}
 
 // flush writes every change since the last flush in one transaction.
 func (s *state) flush() error {
-	if len(s.dirtyRows) == 0 && !s.dirtyQueue && !s.dirtyMeta {
+	if len(s.dirtyRows) == 0 && len(s.dirtyQ) == 0 && len(s.deletedQ) == 0 && !s.dirtyMeta {
 		return nil
 	}
 	tx, err := s.db.Begin()
@@ -379,15 +484,15 @@ func (s *state) flush() error {
 			}
 		}
 	}
-	if s.dirtyQueue {
-		if _, err := tx.Exec(`DELETE FROM queue`); err != nil {
+	for _, id := range s.deletedQ {
+		if _, err := tx.Exec(`DELETE FROM queue WHERE id = ?`, id); err != nil {
 			return err
 		}
-		for _, q := range s.queue {
-			if _, err := tx.Exec(`INSERT INTO queue (id, op, path, to_path, stage, shash, tries) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				q.ID, q.Op, q.Path, q.To, q.Stage, q.SHash, q.Tries); err != nil {
-				return err
-			}
+	}
+	for q := range s.dirtyQ {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO queue (id, op, path, to_path, stage, shash, tries) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			q.ID, q.Op, q.Path, q.To, q.Stage, q.SHash, q.Tries); err != nil {
+			return err
 		}
 	}
 	if s.dirtyMeta {
@@ -401,7 +506,8 @@ func (s *state) flush() error {
 		return err
 	}
 	clear(s.dirtyRows)
-	s.dirtyQueue = false
+	clear(s.dirtyQ)
+	s.deletedQ = s.deletedQ[:0]
 	s.dirtyMeta = false
 	return nil
 }
