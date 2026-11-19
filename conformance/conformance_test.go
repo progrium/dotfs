@@ -25,6 +25,7 @@ func shimTarget(s *shim.Server) conformance.Target {
 
 // TestShim runs the whole suite against the W0 fakes behind the 9P shim.
 func TestShim(t *testing.T) {
+	t.Parallel()
 	s := shim.New(shim.Options{QueueLen: 64})
 	rep := conformance.RunTest(t, shimTarget(s), conformance.Options{Overflow: 500})
 	for _, p := range rep.Profiles {
@@ -40,6 +41,7 @@ func TestShim(t *testing.T) {
 // TestShimBugs checks that the suite catches deliberate protocol
 // violations: each bug must fail the tests listed for it.
 func TestShimBugs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		bug  shim.Bug
 		run  string
@@ -52,6 +54,7 @@ func TestShimBugs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(string(c.bug), func(t *testing.T) {
+			t.Parallel()
 			s := shim.New(shim.Options{Bugs: []shim.Bug{c.bug}})
 			rep, err := conformance.Run(context.Background(), shimTarget(s), conformance.Options{Run: c.run, Overflow: 50, Timeout: 4 * time.Second})
 			if err != nil {
@@ -76,6 +79,7 @@ func TestShimBugs(t *testing.T) {
 // TestShimSubset runs the suite against a server with only some
 // extensions, which must skip the rest and still meet its profile.
 func TestShimSubset(t *testing.T) {
+	t.Parallel()
 	s := shim.New(shim.Options{Extensions: []string{"index"}})
 	rep, err := conformance.Run(context.Background(), shimTarget(s), conformance.Options{})
 	if err != nil {

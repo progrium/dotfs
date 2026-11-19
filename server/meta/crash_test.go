@@ -226,6 +226,7 @@ func TestKill(t *testing.T) {
 	for op := range killOps {
 		for _, step := range steps {
 			t.Run(op+"/"+step, func(t *testing.T) {
+				t.Parallel()
 				dir := t.TempDir()
 				st, m := openDir(t, dir)
 				killSetup(t, st, m)
