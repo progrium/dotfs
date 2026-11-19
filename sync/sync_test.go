@@ -746,6 +746,25 @@ func TestRunWatchesAndFollows(t *testing.T) {
 	b.remove("/hello.txt")
 	waitFor(a, "/hello.txt", "")
 
+	// A burst of new files, some edited and one removed again: b applies
+	// the waiting events in batches, fetching their files in parallel.
+	for i := range 200 {
+		a.write(fmt.Sprintf("/burst/f%03d", i), fmt.Sprint("v1 ", i))
+	}
+	time.Sleep(100 * time.Millisecond)
+	for i := range 10 {
+		a.write(fmt.Sprintf("/burst/f%03d", i), fmt.Sprint("v2 ", i))
+	}
+	a.remove("/burst/f199")
+	for i := range 199 {
+		want := fmt.Sprint("v1 ", i)
+		if i < 10 {
+			want = fmt.Sprint("v2 ", i)
+		}
+		waitFor(b, fmt.Sprintf("/burst/f%03d", i), want)
+	}
+	waitFor(b, "/burst/f199", "")
+
 	// Going offline and back.
 	a.setOnline(false)
 	a.write("/offline.txt", "queued")

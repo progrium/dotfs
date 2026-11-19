@@ -599,17 +599,8 @@ func (e *Engine) session(ctx context.Context, hints <-chan hint) error {
 				if err := e.scanHints(); err != nil {
 					return err
 				}
-				if err := e.applyMsg(ctx, m); err != nil {
+				if err := e.applyWaiting(ctx, m); err != nil {
 					return err
-				}
-				for {
-					err := e.nextEvent(ctx, false)
-					if err == errNoEvent {
-						break
-					}
-					if err != nil {
-						return err
-					}
 				}
 				if err := e.afterRemote(ctx); err != nil {
 					return err
@@ -646,6 +637,69 @@ func (e *Engine) session(ctx context.Context, hints <-chan hint) error {
 			}
 		}
 	}
+}
+
+// eventBatch bounds how many waiting events applyWaiting takes at once.
+const eventBatch = 1024
+
+// applyWaiting applies m and every event waiting after it, until none is
+// left. The files a batch of events adds or changes are fetched in
+// parallel first, so a burst of new files is not fetched one at a time.
+func (e *Engine) applyWaiting(ctx context.Context, m evMsg) error {
+	for {
+		msgs := []evMsg{m}
+	collect:
+		for len(msgs) < eventBatch && m.err == nil {
+			select {
+			case m = <-e.ev.ch:
+				msgs = append(msgs, m)
+			default:
+				break collect
+			}
+		}
+		if err := e.applyBatch(ctx, msgs); err != nil {
+			return err
+		}
+		select {
+		case m = <-e.ev.ch:
+		default:
+			return nil
+		}
+	}
+}
+
+// applyBatch prefetches the files msgs put, then applies msgs in order.
+func (e *Engine) applyBatch(ctx context.Context, msgs []evMsg) error {
+	var ents []fsproto.Entry
+	at := map[string]int{}
+	for _, m := range msgs {
+		ent := m.ev.Entry
+		if m.err != nil || m.ev.Op != fsproto.OpPut || ent.Type != fsproto.TypeFile || m.ev.Seq <= e.st.seq || e.excluded(ent.Path, false) {
+			continue
+		}
+		if r := e.st.get(ent.Path); r != nil && ent.Version <= r.Version {
+			continue
+		}
+		if i, ok := at[ent.Path]; ok {
+			ents[i] = ent // only the last version is worth fetching
+			continue
+		}
+		at[ent.Path] = len(ents)
+		ents = append(ents, ent)
+	}
+	if len(ents) > 1 {
+		e.prefetchAll(ctx, ents)
+		defer e.dropPrefetch()
+	}
+	for _, m := range msgs {
+		if err := e.applyMsg(ctx, m); err != nil {
+			return err
+		}
+		if m.ev.Op == fsproto.OpReset {
+			return nil // the rest came from the old stream
+		}
+	}
+	return nil
 }
 
 func (e *Engine) applyMsg(ctx context.Context, m evMsg) error {
