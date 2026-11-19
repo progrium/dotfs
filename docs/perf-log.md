@@ -39,6 +39,27 @@ Not measured yet: a real network, larger roots, and the kernel 9P mount.
 
 ## Entries
 
+### 2026-11-19: small-file throughput (34db696, f3c4c3b, 6609f0c, 2eb20e1, and 77040f2)
+
+Five changes, each measured with a full `go run ./bench -systems dotfs` on the 100,000-file corpus, on a 4-vCPU Xeon @ 2.10 GHz, in the order they landed. "On the server" is when the last of the 10,000 files was committed; "A to B" is when all of them were on B.
+
+| Change | 10,000 new 4 KiB files, A to B | On the server | Seed device A |
+| --- | --- | --- | --- |
+| Before (dev at 2460fa6) | 25.5 s | 23.6 s | 231.7 s |
+| Verify and sync the stage file before the scope lock (34db696) | 20.4 s | 19.8 s | 204.0 s |
+| New files up to 64 KiB skip commit-hash (f3c4c3b) | 21.4 s | 20.1 s | 187.1 s |
+| Group commit in each scope's writer (6609f0c) | 20.2 s | **13.0 s** | **126.5 s** |
+| Rolling upload window instead of 256-file barriers (2eb20e1) | 20.2 s | 13.2 s | 129.5 s |
+| B fetches the files of waiting events in parallel (77040f2) | **13.9, 17.6, 17.8 s** | 14.0, 14.0, 14.3 s | 144.1, 123.4, 124.1 s |
+
+- **Stage verification outside the lock.** Commit hashed (when needed) and fsynced the stage file while holding the scope's writer lock, so every other upload waited on that I/O. `store.VerifyStage` now does both before the lock, and `PrepareStage` reuses the result when no write has landed since.
+- **No commit-hash for new small files.** It almost always missed and cost a round trip plus a turn in the writer's queue. The small-file time did not move beyond run-to-run spread; the seed, which is mostly new small files, sped up by 8%.
+- **Group commit.** Whoever takes a scope's lock commits every change waiting for it with one intent transaction, the renames in seq order, one fsync per directory, and one apply transaction; a stale base fails only its own change, and recovery replays a group's intent. The server took in the burst 1.5 times faster and the seed 1.5 times faster, but B, which fetched each event's file one at a time, became the limit, so A to B did not move.
+- **Rolling window.** No measurable change: with group commit, the eight uploads in flight were no longer waiting on the barriers.
+- **Parallel fetches on B.** When events are waiting, B takes up to 1,024, fetches their files eight at a time, then applies them in order. A to B fell to 13.9 to 17.8 s across three runs; B still trails the server by up to 3.5 s in some runs.
+
+All told, 10,000 new files go from A to B 1.4 to 1.8 times faster (Syncthing took 11.8 to 13.3 s in the comparison above), and seeding A is 1.6 to 1.9 times faster. Bootstrap (53 to 58 s), change to visible (p95 1.21 to 1.29 s), and reconnect (18.2 to 20.3 s) stayed within their usual spread.
+
 ### 2026-11-19: sync client memory (541cc38, e8bb2ad, b840c35, and 4c6aace)
 
 Four changes to the `dotfs sync` client: ctl replies read with a pooled 4 KiB buffer instead of a new 252 KiB one per command (`client/ctl.go`); pooled 32 KiB copy buffers and BLAKE3 hashers, with 16 KiB of spare capacity so the hasher stops allocating padded copies of each write's last chunks; the content-hash index as one path per raw 32-byte digest, with a second map only for duplicate content, instead of a set of paths per hex string; and a soft memory limit of 128 MiB (`-memlimit`, 0 for none, `$GOMEMLIMIT` wins). Full benchmark, 100,000-file corpus, on a 4-vCPU Xeon @ 2.10 GHz: two runs each of dev at c4c3455 and of these commits, and one of these commits with `GOMEMLIMIT=off` to separate the limit from the rest. Cells give the first run, then the second; the heap and allocation rows come from the first run of each, whose binaries sampled the heap every 2 s.
@@ -78,6 +99,6 @@ The cross-process integration tests and `bench`. No change in speed or space.
 
 ## Follow-ups
 
-- Commit throughput for small files: batch fsyncs on the server (group commit across a scope's writer), or let a client commit several staged files in one command.
+- Small files on B: it still trails the server by up to 3.5 s on a 10,000-file burst. Bigger event batches (it takes only what is waiting), or fewer round trips per fetch, are the next things to try.
 - Client memory: keep rows in SQLite and cache only what a cycle needs (rows are most of the live heap now); reuse `client.Upload`'s buffers.
 - Run the benchmark across a real network, where dotfs's fewer round trips per file should matter more and its sequential large-file uploads may matter less.
