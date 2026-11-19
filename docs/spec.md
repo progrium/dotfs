@@ -369,3 +369,15 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - Clearing flag `i` merges the children back into the parent, each with the version of that `flags` change, and ends the nested scope and its log. A nested scope that holds another nested scope cannot be merged (`invalid`).
 - Both are one `flags` record in the parent. A client that mirrors the parent and sees `i` added or removed re-reads what moved: the nested index, or the parent's.
 - The in-memory fakes in `server/fake` do not implement this: they treat a nested scope as an independent namespace and do not hide its children from the parent.
+
+**9P server** (`dotfs serve`, packages `server/ninep` and `server/auth`)
+
+- One listener speaks both dialects. A `Tversion` starting `9P2000.L` gets 9P2000.L; any other `9P2000` version gets plain 9P2000.
+- The attach name is `[<user>/]<root>[?token=<token>]`. The user is, in order: the owner of the token in the attach name, the user the WebSocket upgrade's bearer token (or `dotfs_token` cookie) named, the attach's uname, or the user part of the name. A root of another user is refused with a 9P error (`EACCES`). TCP and Unix listeners trust the named user unless the server requires a token there.
+- `.fs` can be walked to at every scope root but is not listed in directory reads, so tools that copy a tree do not descend into it or block on `events`.
+- A ctl write holds one command, with or without a trailing newline; reads from offset 0 return its reply ending in a newline, and the next write on the fid replaces it. A command over 64 KiB fails with a 9P error.
+- An `index` fid takes its snapshot at the first read and keeps it, so reads at any offset come from one seq. With `accept zstd`, the server compresses the body itself when its index source has no zstd copy.
+- An `events` read returns only whole records that fit in its count; if the next record alone does not fit, the read fails with a 9P error (`EMSGSIZE`). Setup writes after the first read fail. After a `reset` record, reads return 0 bytes. Clunking the fid, or closing the connection, ends a pending read.
+- Creating a file with plain 9P (`Tlcreate` or `Tcreate`) commits an empty file at once, base `0`, so the path exists for a following walk, then commits the content at clunk. A plain write is therefore two changes. A plain write to an existing file seeds a private stage file with the current content (unless opened with truncate) and commits it unconditionally at clunk or fsync; its mode is kept and its mtime is the commit time. Setting an mtime while writing commits the pending content first. Stage files used for this start with `.dotfs-plain-` and are not listed in `.fs/stage/`.
+- A Linux `rename` across scopes fails with `EXDEV`. `mkdir` over 9P ignores the requested mode, since the `mkdir` command has none. Hard links and device files are refused (`EPERM`).
+- `dotfs serve` creates a missing root the first time its owner attaches to it, unless started with `-create-roots=false`, and removes stage files not written for 24 hours.
