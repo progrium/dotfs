@@ -360,7 +360,7 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 
 - `commit-hash` looks at every root of the attaching user, and only at content that is still published at some path in one of them. Content another user holds, or that was deleted, is `missing`.
 - Once a `commit` has taken a stage file, further writes through fids still open on it fail with a 9P error, so published content always matches its hash.
-- The log keeps the last 100,000 changes of each scope by default; an older `since` gets `reset`.
+- The log keeps the last 100,000 changes of each scope by default (`dotfs serve -keep-log` changes it); an older `since` gets `reset`.
 - A change is visible in `stat`, the index, and events only once its content is in place on disk, and a server restarted after a crash finishes any change it had recorded, so a version is never reused.
 
 **Conformance suite** (`dotfs conform`, package `conformance`)
