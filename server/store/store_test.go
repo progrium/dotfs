@@ -200,3 +200,39 @@ func TestRemoveTreeAndPlaceRetry(t *testing.T) {
 		t.Fatalf("tmp not empty: %v", des)
 	}
 }
+
+// TestVerifyStage checks that a commit uses VerifyStage's hash only when
+// nothing was written after it, and that verifying a name whose file a
+// commit already took finds nothing.
+func TestVerifyStage(t *testing.T) {
+	st := newStore(t, &store.Options{NoSync: true})
+	r := server.NewRoot("alice", "home")
+	st.CreateRoot(r)
+
+	stage(t, st, "s", "before")
+	if err := st.VerifyStage("alice", "s"); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := st.OpenStage("alice", "s", true)
+	f.WriteAt([]byte("AFTER!"), 0) // same size, written after the verify
+	f.Close()
+	want := fsproto.HashBytes([]byte("AFTER!"))
+	if h, _, err := st.Publish("alice", "s", r, "/a", 0o644, 1, ""); err != nil || h != want {
+		t.Fatalf("publish: %s %v, want %s", h, err, want)
+	}
+	if err := st.VerifyStage("alice", "s"); !errors.Is(err, fsproto.ErrMissing) {
+		t.Fatalf("verify after commit: %v", err)
+	}
+
+	stage(t, st, "t", "verified")
+	if err := st.VerifyStage("alice", "t"); err != nil {
+		t.Fatal(err)
+	}
+	want = fsproto.HashBytes([]byte("verified"))
+	if _, _, err := st.Publish("alice", "t", r, "/b", 0o644, 1, fsproto.HashBytes([]byte("other"))); !errors.Is(err, fsproto.ErrInvalid) {
+		t.Fatalf("wrong hash: %v", err)
+	}
+	if h, _, err := st.Publish("alice", "t", r, "/b", 0o644, 1, want); err != nil || h != want || read(t, st, r, "/b") != "verified" {
+		t.Fatalf("publish: %s %v", h, err)
+	}
+}

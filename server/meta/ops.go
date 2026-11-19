@@ -25,6 +25,7 @@ type change struct {
 	m    *Meta
 	sc   *scope
 	seq  uint64
+	over overlay // what earlier changes in the same group did
 	plan plan
 	ev   fsproto.Event
 	hash string
@@ -32,6 +33,12 @@ type change struct {
 }
 
 func (c *change) get(p string) (fsproto.Entry, bool, error) {
+	if e, ok := c.over[p]; ok {
+		if e == nil {
+			return fsproto.Entry{}, false, nil
+		}
+		return *e, true, nil
+	}
 	return getEntry(c.ctx, c.m.rdb, c.sc.id, p)
 }
 
@@ -94,38 +101,19 @@ func (c *change) place(prep store.Prepared, p string) {
 	c.fs(fsOp{Kind: fsPlace, Prep: prep, Path: c.rootPath(p)})
 }
 
-// change runs build with the scope locked, then commits the plan it made
-// and publishes the record.
+// change queues a change that can share a group commit with others (see
+// group.go): build may look up single paths, and its plan only puts or
+// deletes single entries and has filesystem steps that a later change in
+// the group cannot undo or redo wrongly.
 func (w *writer) change(ctx context.Context, o server.Origin, build func(c *change) error) (server.Result, error) {
-	sc := w.sc
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	if sc.gone {
-		return server.Result{}, server.ErrNoScope
-	}
-	if sc.broken != nil {
-		if err := w.m.repair(sc); err != nil {
-			return server.Result{}, err
-		}
-	}
-	c := &change{ctx: ctx, m: w.m, sc: sc, seq: sc.seq.Load() + 1}
-	defer func() {
-		for _, f := range c.done {
-			f()
-		}
-	}()
-	if err := build(c); err != nil {
-		w.m.discard(&c.plan)
-		return server.Result{}, err
-	}
-	ev := c.ev
-	ev.Seq, ev.Dev = c.seq, o.Dev
-	c.plan.Seq, c.plan.Event = c.seq, ev.Encode()
-	if err := w.m.commitPlan(sc, &c.plan); err != nil {
-		return server.Result{}, err
-	}
-	w.m.publish(sc.key, ev)
-	return server.Result{Version: c.seq, Hash: c.hash, Event: ev}, nil
+	return w.submit(ctx, o, false, build)
+}
+
+// solo queues a change that commits on its own: it reads more than single
+// paths (directory contents, the filesystem, or nested scopes), or changes
+// more than single entries.
+func (w *writer) solo(ctx context.Context, o server.Origin, build func(c *change) error) (server.Result, error) {
+	return w.submit(ctx, o, true, build)
 }
 
 func now(c *change) int64 { return c.m.opts.Now().Unix() }
@@ -153,7 +141,7 @@ func (w *writer) Mkdir(ctx context.Context, o server.Origin, cmd fsproto.MkdirCm
 }
 
 func (w *writer) remove(ctx context.Context, o server.Origin, p string, base fsproto.Base, recursive bool) (server.Result, error) {
-	return w.change(ctx, o, func(c *change) error {
+	return w.solo(ctx, o, func(c *change) error {
 		if err := c.checkPath(p); err != nil {
 			return err
 		}
@@ -199,7 +187,7 @@ func (w *writer) Rmtree(ctx context.Context, o server.Origin, cmd fsproto.Rmtree
 }
 
 func (w *writer) Mv(ctx context.Context, o server.Origin, cmd fsproto.MvCmd) (server.Result, error) {
-	return w.change(ctx, o, func(c *change) error {
+	return w.solo(ctx, o, func(c *change) error {
 		for _, p := range []string{cmd.From, cmd.To} {
 			if err := c.checkPath(p); err != nil {
 				return err
@@ -242,7 +230,7 @@ func (w *writer) Mv(ctx context.Context, o server.Origin, cmd fsproto.MvCmd) (se
 }
 
 func (w *writer) Cp(ctx context.Context, o server.Origin, cmd fsproto.CpCmd) (server.Result, error) {
-	return w.change(ctx, o, func(c *change) error {
+	return w.solo(ctx, o, func(c *change) error {
 		for _, p := range []string{cmd.From, cmd.To} {
 			if err := c.checkPath(p); err != nil {
 				return err
@@ -286,7 +274,7 @@ func (w *writer) Cp(ctx context.Context, o server.Origin, cmd fsproto.CpCmd) (se
 }
 
 func (w *writer) SetFlags(ctx context.Context, o server.Origin, cmd fsproto.FlagsCmd) (server.Result, error) {
-	return w.change(ctx, o, func(c *change) error {
+	return w.solo(ctx, o, func(c *change) error {
 		if err := c.checkPath(cmd.Path); err != nil {
 			return err
 		}
@@ -366,6 +354,10 @@ func (c *change) putFile(old fsproto.Entry, p string, mode uint32, mtime, length
 }
 
 func (w *writer) Commit(ctx context.Context, o server.Origin, cmd fsproto.CommitCmd) (server.Result, error) {
+	// Hash and sync the stage file before queueing, so that other changes
+	// do not wait on it; PrepareStage reuses the result if nothing was
+	// written since, and otherwise does the work and reports any error.
+	w.m.st.VerifyStage(o.User, cmd.Stage)
 	return w.change(ctx, o, func(c *change) error {
 		old, err := c.fileTarget(cmd.Path, cmd.Base)
 		if err != nil {
@@ -413,7 +405,7 @@ func (w *writer) Symlink(ctx context.Context, o server.Origin, path, target stri
 }
 
 func (w *writer) SetAttr(ctx context.Context, o server.Origin, path string, mode *uint32, mtime *int64) (server.Result, error) {
-	return w.change(ctx, o, func(c *change) error {
+	return w.solo(ctx, o, func(c *change) error {
 		if err := c.checkPath(path); err != nil {
 			return err
 		}

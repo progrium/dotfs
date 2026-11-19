@@ -746,6 +746,25 @@ func TestRunWatchesAndFollows(t *testing.T) {
 	b.remove("/hello.txt")
 	waitFor(a, "/hello.txt", "")
 
+	// A burst of new files, some edited and one removed again: b applies
+	// the waiting events in batches, fetching their files in parallel.
+	for i := range 200 {
+		a.write(fmt.Sprintf("/burst/f%03d", i), fmt.Sprint("v1 ", i))
+	}
+	time.Sleep(100 * time.Millisecond)
+	for i := range 10 {
+		a.write(fmt.Sprintf("/burst/f%03d", i), fmt.Sprint("v2 ", i))
+	}
+	a.remove("/burst/f199")
+	for i := range 199 {
+		want := fmt.Sprint("v1 ", i)
+		if i < 10 {
+			want = fmt.Sprint("v2 ", i)
+		}
+		waitFor(b, fmt.Sprintf("/burst/f%03d", i), want)
+	}
+	waitFor(b, "/burst/f199", "")
+
 	// Going offline and back.
 	a.setOnline(false)
 	a.write("/offline.txt", "queued")
@@ -782,4 +801,37 @@ func TestNestedScopeLeftAlone(t *testing.T) {
 	if r := b.e.st.get("/photos/one.jpg"); r != nil {
 		t.Fatal("b still tracks a path inside the nested scope")
 	}
+}
+
+// TestRunWithConflicts sends a long run of new small files in which a few
+// paths conflict with files another node committed first: the rest commit,
+// each conflict leaves one copy, and nothing is lost.
+func TestRunWithConflicts(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.node("a"), w.node("b")
+	want := map[string]string{}
+	for i := range 300 {
+		p := fmt.Sprintf("/f%03d", i)
+		b.write(p, "b "+p)
+		want[p] = "b " + p
+	}
+	for _, i := range []int{50, 150, 250} {
+		p := fmt.Sprintf("/f%03d", i)
+		a.write(p, "a "+p)
+		want[p] = "a " + p
+	}
+	a.sync()
+	b.sync()
+	got := w.converge(a, b)
+	copies := conflictCopies(got)
+	if len(copies) != 3 {
+		t.Fatalf("want 3 conflict copies, got %v", copies)
+	}
+	for _, c := range copies {
+		if !strings.HasPrefix(got[c], "b /f") {
+			t.Fatalf("conflict copy %s holds %q", c, got[c])
+		}
+		delete(got, c)
+	}
+	expect(t, got, want)
 }
