@@ -7,7 +7,6 @@ import (
 	"io"
 	"math/rand"
 	"net"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -230,27 +229,42 @@ func TestFollowerSurvivesDrops(t *testing.T) {
 	defer f.Close()
 
 	const total = 300
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// The writer reports to errc rather than t, since it may still be
+	// running if collect fails.
+	errc := make(chan error, 1)
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
-		defer wg.Done()
+		defer func() { writer.Close() }()
 		for i := 0; i < total; i += 30 {
-			writeN(t, writer, i, 30)
+			for j := i; j < i+30; j++ {
+				if _, err := client.Call(ctx, writer, fsproto.MkdirCmd{Path: "/d" + itoa(j)}); err != nil {
+					errc <- err
+					return
+				}
+			}
 			// Drop the follower's connection (and the writer's) mid-stream.
 			s.DropConns()
-			time.Sleep(5 * time.Millisecond)
+			select {
+			case <-stop:
+				errc <- nil
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
 			w, err := client.Dial(ctx, s.Addr(), client.Options{Root: "home"})
 			if err != nil {
-				t.Error(err)
+				errc <- err
 				return
 			}
 			writer.Close()
 			writer = w
 		}
-		writer.Close()
+		errc <- nil
 	}()
 	collect(t, f, 1, total)
-	wg.Wait()
+	if err := <-errc; err != nil {
+		t.Fatal("writer:", err)
+	}
 	if dials.Load() < 2 {
 		t.Fatalf("follower dialed %d times; the drops did not reach it", dials.Load())
 	}

@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"errors"
-	"io"
 	"time"
 
 	"github.com/progrium/dotfs/fsproto"
@@ -17,9 +16,9 @@ type OpenEvents func(ctx context.Context, setup fsproto.EventsSetup) (EventStrea
 var ErrNeedsReset = errors.New("dotfs: event stream was reset; re-read the index and Restart")
 
 // Follower reads events across dropped connections. It remembers the seq
-// of the last record it returned, and when a stream fails with a transport
-// error (see IsTransport) it reopens one with since set to that seq, after
-// a backoff, and drops any record at or below it, so the caller sees every
+// of the last record it returned, and when a stream read fails it reopens
+// one with since set to that seq, after a backoff (opening is retried while
+// it fails with a transport error, see IsTransport), and drops any record at or below it, so the caller sees every
 // change once, in order, without gaps (beyond those path filters and
 // coalesce allow).
 //
@@ -92,11 +91,12 @@ func (f *Follower) Next(ctx context.Context) (fsproto.Event, error) {
 			if ctx.Err() != nil {
 				return fsproto.Event{}, ctx.Err()
 			}
+			// Any read failure ends the stream, whether the connection
+			// dropped or the server failed the read (a server may answer a
+			// pending read with an error such as EINTR as its connection
+			// closes); reopening from the last seq loses nothing.
 			f.st.Close()
 			f.st = nil
-			if !IsTransport(err) && err != io.EOF {
-				return fsproto.Event{}, err
-			}
 			if err := f.wait(ctx); err != nil {
 				return fsproto.Event{}, err
 			}
