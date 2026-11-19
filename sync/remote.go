@@ -53,7 +53,7 @@ func (e *Engine) handleEvent(ctx context.Context, ev fsproto.Event) error {
 // reconcile) it applies even an entry older than the row.
 func (e *Engine) applyPut(ctx context.Context, ent fsproto.Entry, force bool) error {
 	p := ent.Path
-	if p == "/" || e.ign.Ignored(p, ent.Type == fsproto.TypeDir) {
+	if p == "/" || e.excluded(p, ent.Type == fsproto.TypeDir) {
 		return nil
 	}
 	r := e.st.get(p)
@@ -343,7 +343,7 @@ func (e *Engine) applyMv(from, to string, seq uint64) error {
 	}
 	rf := e.st.get(from)
 	if rf == nil || rf.Version >= seq {
-		if rf == nil && !e.ign.Ignored(to, true) && !e.ign.Ignored(to, false) {
+		if rf == nil && !e.excluded(to, true) && !e.excluded(to, false) {
 			// Something we do not have moved into view; only the index
 			// can say what it is.
 			e.reconcile = true
@@ -351,7 +351,7 @@ func (e *Engine) applyMv(from, to string, seq uint64) error {
 		return nil
 	}
 	dir := rf.Type == fsproto.TypeDir
-	if e.ign.Ignored(to, dir) {
+	if e.excluded(to, dir) {
 		return e.applyDel(from, seq)
 	}
 	// Make room at the destination.
@@ -403,6 +403,25 @@ func (e *Engine) applyFlags(p string, flags fsproto.Flags, seq uint64) {
 	nr.Flags = flags
 	nr.Version = seq
 	e.st.put(&nr)
+	wasNested, nested := r.Flags.Has(fsproto.FlagIndex), flags.Has(fsproto.FlagIndex)
+	switch {
+	case nested && !wasNested:
+		// The directory became a nested scope: stop tracking what is below
+		// it, and leave the local files alone.
+		e.logf("%s is now a nested scope; leaving its contents alone", p)
+		kids := e.st.subtree(p)
+		for _, k := range kids[1:] {
+			e.st.del(k)
+		}
+		for _, q := range append([]*qent(nil), e.st.queue...) {
+			if q.Path != p && fsproto.Within(q.Path, p) || q.To != "" && q.To != p && fsproto.Within(q.To, p) {
+				e.st.dequeue(q)
+			}
+		}
+	case wasNested && !nested:
+		// Merged back into this scope: the index lists its contents again.
+		e.reconcile = true
+	}
 }
 
 // reconcileIndex reads the index and makes the rows and the folder match
@@ -438,7 +457,7 @@ func (e *Engine) reconcileIndex(ctx context.Context) error {
 		if ent.Type == fsproto.TypeDir && pr {
 			pdirs[ent.Path] = true
 		}
-		if ent.Type != fsproto.TypeFile || e.ign.Ignored(ent.Path, false) {
+		if ent.Type != fsproto.TypeFile || e.excluded(ent.Path, false) {
 			continue
 		}
 		if r := e.st.get(ent.Path); r != nil && r.Version == ent.Version && r.Hash == ent.Hash {

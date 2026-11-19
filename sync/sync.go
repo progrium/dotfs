@@ -62,8 +62,9 @@
 // # Limits
 //
 // Symlinks are downloaded but not uploaded, since no ctl command creates
-// one. Directory modes and mtimes are not synced. Nested scopes (flag i)
-// are treated as ordinary directories. Names that collide on a
+// one. Directory modes and mtimes are not synced. A nested scope (flag i)
+// is synced as a directory, but what is below it is left alone in both
+// directions, since it has its own index and events. Names that collide on a
 // case-insensitive filesystem are not handled.
 package sync
 

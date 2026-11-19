@@ -725,3 +725,33 @@ func TestRunWatchesAndFollows(t *testing.T) {
 	a.setOnline(true)
 	waitFor(b, "/offline.txt", "queued")
 }
+
+func TestNestedScopeLeftAlone(t *testing.T) {
+	w := newWorld(t)
+	a, b := w.node("a"), w.node("b")
+	a.write("/photos/one.jpg", "1")
+	a.write("/notes.txt", "n")
+	w.converge(a, b)
+
+	// Another client makes /photos a nested scope.
+	c, err := fake.Dial(w.srv, "alice", "home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Call(context.Background(), c, fsproto.FlagsCmd{Path: "/photos", Flags: "i"}); err != nil {
+		t.Fatal(err)
+	}
+	a.write("/photos/two.jpg", "2")
+	a.write("/notes.txt", "n2")
+	a.sync()
+	b.sync()
+	if _, ok := w.serverTree()["/photos/two.jpg"]; ok {
+		t.Fatal("a file inside a nested scope was committed to the parent")
+	}
+	if got := b.tree(); got["/photos/one.jpg"] != "1" || got["/notes.txt"] != "n2" {
+		t.Fatalf("b lost files or missed changes:\n%s", show(got))
+	}
+	if r := b.e.st.get("/photos/one.jpg"); r != nil {
+		t.Fatal("b still tracks a path inside the nested scope")
+	}
+}

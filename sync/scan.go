@@ -70,7 +70,7 @@ func (e *Engine) collect(s *scanSet, d string, recursive bool) error {
 		if err != nil {
 			return err
 		}
-		if st.exists && st.typ != 0 && !e.ign.Ignored(d, st.typ == fsproto.TypeDir) {
+		if st.exists && st.typ != 0 && !e.excluded(d, st.typ == fsproto.TypeDir) {
 			s.disk[d] = st
 		}
 		if e.st.get(d) != nil {
@@ -93,7 +93,7 @@ func (e *Engine) collect(s *scanSet, d string, recursive bool) error {
 		if err != nil {
 			return err
 		}
-		if !st.exists || st.typ == 0 || e.ign.Ignored(p, st.typ == fsproto.TypeDir) {
+		if !st.exists || st.typ == 0 || e.excluded(p, st.typ == fsproto.TypeDir) {
 			continue
 		}
 		s.disk[p] = st
@@ -156,7 +156,7 @@ func (e *Engine) scan(roots []hint) error {
 	sort.Strings(paths)
 	for _, p := range paths {
 		r := e.st.get(p)
-		if r != nil && e.ign.Ignored(p, r.Type == fsproto.TypeDir) {
+		if r != nil && e.excluded(p, r.Type == fsproto.TypeDir) {
 			continue
 		}
 		st, onDisk := s.disk[p]
@@ -312,6 +312,21 @@ func (e *Engine) reloadIgnores() error {
 	e.reconcile = true
 	e.hints["/"] = true
 	return nil
+}
+
+// excluded reports whether the engine leaves p alone: it is ignored, or
+// below a nested scope (flag i), which has its own index and events that
+// this engine does not follow.
+func (e *Engine) excluded(p string, dir bool) bool {
+	if e.ign.Ignored(p, dir) {
+		return true
+	}
+	for q := fsproto.Parent(p); q != "/"; q = fsproto.Parent(q) {
+		if r := e.st.get(q); r != nil && r.Flags.Has(fsproto.FlagIndex) {
+			return true
+		}
+	}
+	return false
 }
 
 // depth counts a path's components.

@@ -353,6 +353,7 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - A local rename is sent as `mv` with the source's base and a destination base of `0` when the client can tell it is one (same inode, or else a unique hash match). A local delete of a directory is sent as conditional `rm` of each path, deepest first, never `rmtree`, so an edit made on the server meanwhile is not lost.
 - The ignore file is `.dotfsignore` at the top of the root, synced like any file. Ignored paths are neither sent nor received. Built in: `/.dotfs`, any `.fs`, `.DS_Store`, `Thumbs.db`, `desktop.ini`, `*.swp`, `*.swo`, `*.swx`, `*~`, `.#*`, `#*#`, `~$*`, and `.~lock.*#`.
 - Symlinks are received but not sent, since no ctl command creates one. Directory modes and mtimes are not sent.
+- A nested scope is mirrored as a directory only: once flag `i` appears, the client stops tracking what is below it and leaves those local files alone, and when the flag is cleared it re-reads the parent's index. Following nested scopes is left for later.
 
 **Storage** (server packages `server/store` and `server/meta`)
 

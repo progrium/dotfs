@@ -137,7 +137,7 @@ func (e *Engine) push(ctx context.Context, q *qent) (outcome, error) {
 	}
 	p := q.Path
 	r := e.st.get(p)
-	if e.ign.Ignored(p, r != nil && r.Type == fsproto.TypeDir) {
+	if e.excluded(p, r != nil && r.Type == fsproto.TypeDir) {
 		return pushed, nil
 	}
 	ls, st, h, err := e.classify(p, r)
