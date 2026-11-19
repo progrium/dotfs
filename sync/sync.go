@@ -77,6 +77,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	gosync "sync"
 	"sync/atomic"
 	"time"
@@ -92,8 +93,10 @@ type Config struct {
 	// Dial connects to the scope to mirror. The engine calls it again after
 	// the connection fails.
 	Dial func(ctx context.Context) (client.Conn, error)
-	// Root identifies the scope, such as "host:port/root". It is stored in
-	// state.db, and the engine refuses a folder synced with another root.
+	// Root identifies the scope as "<address>/<name>", such as
+	// "host:port/home". It is stored in state.db. The engine refuses a
+	// folder synced with a root of another name; when only the address
+	// changed, it bootstraps again and merges, deleting nothing local.
 	Root string
 	// Device names this client in events and in conflict copy names. The
 	// default is the one stored in state.db, or a new one made from the
@@ -165,8 +168,25 @@ func New(cfg Config) (*Engine, error) {
 	}
 	e := &Engine{cfg: cfg, dir: dir, st: st, hints: map[string]bool{}, warned: map[string]bool{}}
 	if old := st.meta["root"]; cfg.Root != "" && old != "" && old != cfg.Root {
-		st.close()
-		return nil, fmt.Errorf("sync: %s: %w (%s)", dir, errOtherRoot, old)
+		if rootName(old) != rootName(cfg.Root) {
+			st.close()
+			return nil, fmt.Errorf("sync: %s: %w (%s)", dir, errOtherRoot, old)
+		}
+		// Same root name at a new address: the server moved, or it is a
+		// different server. Versions from the old address mean nothing
+		// there, so forget them and bootstrap again, which merges the
+		// folder with the server without deleting anything local: files
+		// only here are uploaded, and differing ones become conflict
+		// copies.
+		e.logf("root moved from %s to %s; re-reading it and merging", old, cfg.Root)
+		for p := range st.rows {
+			st.del(p)
+		}
+		for _, q := range append([]*qent(nil), st.queue...) {
+			st.dequeue(q)
+		}
+		st.setSeq(0)
+		st.setMeta("bootstrapped", "")
 	}
 	if cfg.Root != "" {
 		st.setMeta("root", cfg.Root)
@@ -194,6 +214,11 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	return e, nil
+}
+
+// rootName returns the root's name: the last segment of Config.Root.
+func rootName(root string) string {
+	return root[strings.LastIndexByte(root, '/')+1:]
 }
 
 var badDevice = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)

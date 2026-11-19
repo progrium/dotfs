@@ -675,6 +675,34 @@ func TestOtherRootRefused(t *testing.T) {
 	a.open()
 }
 
+func TestRootMovedMerges(t *testing.T) {
+	w := newWorld(t)
+	a := w.node("a")
+	a.write("/kept.txt", "k")
+	a.write("/edited.txt", "v1")
+	a.sync()
+
+	// The server comes back at a new address with a different history:
+	// another server with a root of the same name.
+	w2 := newWorld(t)
+	other := w2.node("other")
+	other.write("/edited.txt", "theirs")
+	other.write("/new.txt", "n")
+	other.sync()
+
+	a.e.Close()
+	a.cfg.Root = "moved:1/home"
+	a.cfg.Dial = other.cfg.Dial
+	a.open()
+	a.sync()
+	a.sync()
+	expect(t, a.tree(), map[string]string{
+		"/kept.txt": "k", "/edited.txt": "theirs", "/new.txt": "n",
+		"/edited.sync-conflict-20261119-041500-a.txt": "v1",
+	})
+	expect(t, w2.serverTree(), a.tree())
+}
+
 func TestRunWatchesAndFollows(t *testing.T) {
 	w := newWorld(t)
 	a, b := w.node("a"), w.node("b")
