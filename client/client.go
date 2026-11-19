@@ -76,7 +76,7 @@ func New(ctx context.Context, rwc io.ReadWriteCloser, opts Options) (*Client, er
 	}
 	stop := context.AfterFunc(ctx, func() { rwc.Close() })
 	defer stop()
-	p9c, err := p9.NewClient(rwc, p9.WithMessageSize(opts.msize()))
+	p9c, err := p9.NewClient(sendSafe{rwc}, p9.WithMessageSize(opts.msize()))
 	if err != nil {
 		rwc.Close()
 		return nil, ctxErr(ctx, fmt.Errorf("dotfs: 9P version: %w", err))
@@ -131,6 +131,24 @@ func dialNet(ctx context.Context, network, addr string, opts Options) (*Client, 
 		return nil, err
 	}
 	return New(ctx, nc, opts)
+}
+
+// sendSafe works around a hang in hugelgupf/p9 v0.5.1. When a send fails,
+// its sendRecv returns without removing the request from the client's
+// pending table and puts the response back in its pool; a later
+// connection error then sends to that response's full channel and blocks
+// the client's receiver, and with it every call, forever. The pool is
+// shared by every client, so the stale response can also fail a call on
+// another, healthy connection with an old error. So writes never
+// fail here: a failed write closes the connection and reports success, and
+// the request fails on the receive side like every other pending one.
+type sendSafe struct{ io.ReadWriteCloser }
+
+func (s sendSafe) Write(p []byte) (int, error) {
+	if _, err := s.ReadWriteCloser.Write(p); err != nil {
+		s.ReadWriteCloser.Close()
+	}
+	return len(p), nil
 }
 
 // Close closes the connection. Open files, streams, and stages fail after

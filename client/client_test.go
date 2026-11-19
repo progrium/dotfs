@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -360,5 +361,47 @@ func TestMissing(t *testing.T) {
 	}
 	if _, err := c.Open(ctx, "relative"); err == nil {
 		t.Fatal("Open of a relative path succeeded")
+	}
+}
+
+// TestConcurrentCallsFailWhenWritesFail checks that when the connection
+// fails under many calls at once, every call returns an error instead of
+// some hanging. hugelgupf/p9 leaves a request whose send failed in its
+// pending table, which can block its receiver for good or, since responses
+// are pooled across clients, hand a stale error to a later client's call;
+// see sendSafe. Without the workaround this fails within a few rounds, one
+// way or the other.
+func TestConcurrentCallsFailWhenWritesFail(t *testing.T) {
+	for round := range 20 {
+		s := ninetest.New(t)
+		nc, err := net.Dial("tcp", s.Addr())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := client.New(ctx, &failConn{Conn: nc, limit: 256 << 10}, client.Options{Root: "home"})
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		data := make([]byte, 64<<10)
+		errs := make(chan error, 8)
+		for i := range 8 {
+			go func() {
+				for j := 0; ; j++ {
+					_, err := client.Upload(ctx, c, fmt.Sprintf("s%d-%d", i, j), bytes.NewReader(data), int64(len(data)))
+					if err != nil {
+						errs <- err
+						return
+					}
+				}
+			}()
+		}
+		for range 8 {
+			select {
+			case <-errs:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("round %d: a call hung after the connection failed", round)
+			}
+		}
+		c.Close()
 	}
 }
