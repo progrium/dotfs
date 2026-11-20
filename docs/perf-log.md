@@ -39,7 +39,7 @@ Not measured yet: a real network, larger roots, and the kernel 9P mount.
 
 ## Entries
 
-### 2026-11-20: `dotfs mount`, the Linux FUSE mount (first measurement)
+### 2026-11-20: `dotfs mount`, the Linux FUSE mount (3c3f650)
 
 `dotfs mount` against one `dotfs serve` over TCP on loopback, on a 4-vCPU Xeon @ 2.10 GHz with Linux 6.18. The root holds 10,000 files of 100 B to 8 KB in 350 directories, plus one 256 MiB file. Each mount starts with an empty cache; "first" is the first touch after mounting, and "again" repeats it. Local disk is the same tree in a plain directory on the same machine.
 
