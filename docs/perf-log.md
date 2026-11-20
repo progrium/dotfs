@@ -39,6 +39,25 @@ Not measured yet: a real network, larger roots, and the kernel 9P mount.
 
 ## Entries
 
+### 2026-11-20: `dotfs mount`, the Linux FUSE mount (3c3f650)
+
+`dotfs mount` against one `dotfs serve` over TCP on loopback, on a 4-vCPU Xeon @ 2.10 GHz with Linux 6.18. The root holds 10,000 files of 100 B to 8 KB in 350 directories, plus one 256 MiB file. Each mount starts with an empty cache; "first" is the first touch after mounting, and "again" repeats it. Local disk is the same tree in a plain directory on the same machine.
+
+| Workload | Mount, kernel caching (this commit) | Mount, before directory caching and NOFLUSH | Mount with `-passthrough` | Local disk |
+| --- | --- | --- | --- | --- |
+| `find` over 10,000 files, first | 0.131 s | 0.126 s | 0.119 s | 0.014 s |
+| `find` again | **0.051 s** | 0.098 s | 0.092 s | 0.014 s |
+| `stat` every file | **0.057 s** | 0.116 s | 0.133 s | 0.027 s |
+| `cat` every file, first (downloads each) | 13.4 s | 13.3 s | 14.5 s | 0.151 s |
+| `cat` every file again | **0.99 s** | 1.17 s | 1.19 s | 0.128 s |
+| `cat` the 256 MiB file, first | 2.05 s | 2.49 s | 2.10 s | 0.072 s |
+| `cat` the 256 MiB file again | 0.047 s | 0.055 s | 0.040 s | 0.036 s |
+
+- **Metadata comes from the index.** Listing and stat never reach the server. With directory listings cached by the kernel (`FOPEN_CACHE_DIR`), a warm `find` is 3.6 times slower than local disk, and stat of every file is 2.1 times slower.
+- **Warm reads come from the page cache** (`FOPEN_KEEP_CACHE`, invalidated when the file changes elsewhere). The 256 MiB file reads at local speed again. Many small files still cost an open and a release round trip into the mount each (about 0.1 ms per file); read-only handles skip the flush round trip (`FOPEN_NOFLUSH`).
+- **First reads are bound by latency**: `cat` downloads one file at a time, at about 1.3 ms per small file and about 125 MB/s for the large one. That is the next thing to improve.
+- **Passthrough did not help** these workloads, since the page cache already serves warm reads, and the kernel refuses (EIO) to open a file for writing while it is open for passthrough reading. So it is off by default, behind `-passthrough`.
+
 ### 2026-11-19: small-file throughput (34db696, f3c4c3b, 6609f0c, 2eb20e1, and 77040f2)
 
 Five changes, each measured with a full `go run ./bench -systems dotfs` on the 100,000-file corpus, on a 4-vCPU Xeon @ 2.10 GHz, in the order they landed. "On the server" is when the last of the 10,000 files was committed; "A to B" is when all of them were on B.
@@ -101,4 +120,6 @@ The cross-process integration tests and `bench`. No change in speed or space.
 
 - Small files on B: it still trails the server by up to 3.5 s on a 10,000-file burst. Bigger event batches (it takes only what is waiting), or fewer round trips per fetch, are the next things to try.
 - Client memory: keep rows in SQLite and cache only what a cycle needs (rows are most of the live heap now); reuse `client.Upload`'s buffers.
+- Mount first reads: fetch a file's bytes with several reads in flight, and prefetch the small files of a directory when one of them is first opened.
+- Measure the mount against a kernel 9P (v9fs) mount of `dotfs serve` on the 100,000-file corpus.
 - Run the benchmark across a real network, where dotfs's fewer round trips per file should matter more and its sequential large-file uploads may matter less.

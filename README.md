@@ -1,6 +1,6 @@
 # dotfs
 
-dotfs is a file sync system built on 9P. A single `dotfs serve` holds each user's roots (folders) on disk, orders every change to them, and serves them over 9P2000.L, plain 9P2000, and 9P over WebSocket. `dotfs sync` keeps a local folder in step with a root, Dropbox-style: it bootstraps from one read of the whole tree, follows a live stream of changes, publishes local edits atomically, and turns concurrent edits into conflict copies instead of losing either side.
+dotfs is a file sync system built on 9P. A single `dotfs serve` holds each user's roots (folders) on disk, orders every change to them, and serves them over 9P2000.L, plain 9P2000, and 9P over WebSocket. `dotfs sync` keeps a local folder in step with a root, Dropbox-style: it bootstraps from one read of the whole tree, follows a live stream of changes, publishes local edits atomically, and turns concurrent edits into conflict copies instead of losing either side. On Linux, `dotfs mount` presents a root as on-demand files instead: the whole tree at once, with each file's content downloaded when it is first opened.
 
 Underneath is a small protocol, also called dotfs (9p-dotfs in full): four extensions a 9P server can expose as synthetic files under `.fs/`.
 
@@ -13,7 +13,7 @@ Underneath is a small protocol, also called dotfs (9p-dotfs in full): four exten
 
 Each extension is useful on its own, and any 9P server can implement any of them. Since the root is still an ordinary 9P tree, plain 9P clients can read and write it too, and their changes show up in the index and the events stream like anyone else's. The protocol is specified in [docs/spec.md](docs/spec.md), whose last section records the choices this implementation made where the text is silent.
 
-This repository holds the spec, the reference implementation in Go (server, client library, and sync engine), a conformance suite that checks any 9P server against the spec, and integration tests and benchmarks.
+This repository holds the spec, the reference implementation in Go (server, client library, sync engine, and mount), a conformance suite that checks any 9P server against the spec, and integration tests and benchmarks.
 
 ## Build
 
@@ -122,6 +122,37 @@ What to expect:
 - **Ignoring files.** Put patterns (`path.Match` syntax, a trailing `/` for directories only, `!` to negate, `#` for comments, and the last match wins) in `.dotfsignore` at the top of the root; it syncs like any other file. Editor swap files, `.DS_Store`, `Thumbs.db`, Office lock files, and similar are always ignored.
 - **Limits.** Symlinks are received but not sent, and directory modes and mtimes are not sent. Nested scopes (directories with flag `i`) are mirrored as directories only.
 
+## Mounting a root (Linux)
+
+```
+dotfs mount [flags] <root> <dir>
+```
+
+`dotfs mount` presents a root at a directory as **on-demand files**: the whole tree is listed at once from the root's index, a file's content is downloaded the first time it is opened, and nothing is copied until then. It uses FUSE, so it needs `/dev/fuse`, and `fusermount3` or `fusermount` when not run as root. `<root>` takes the same addresses as `dotfs sync`. Stop the process, or run `fusermount -u <dir>`, to unmount.
+
+```
+dotfs mount ws://127.0.0.1:8080/9p/home ~/Home
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-token t` | `$DOTFS_TOKEN` | bearer token for a WebSocket server |
+| `-cache dir` | `$XDG_CACHE_HOME/dotfs/mount/<root>-<id>` | where the tree and downloaded files are kept |
+| `-cache-size MiB` | `10240` | limit on downloaded content; the least recently used files are evicted first |
+| `-device id` | from the host name | device id used in conflict copy names |
+| `-timeout d` | `1h` | how long the kernel caches entries and attributes; changes from elsewhere invalidate them at once |
+| `-passthrough` | `false` | let the kernel read cached files directly (FUSE passthrough; needs root and Linux 6.9 or newer) |
+| `-noprefetch` | `false` | don't download files flagged `p` right after reading the index |
+| `-allow-other` | `false` | let other users see the mount |
+| `-q`, `-debug` | | log only problems, or log every FUSE request |
+
+What to expect:
+
+- **Speed.** Listing and stat never wait on the server, and the kernel caches them, along with file content, until a change arrives from elsewhere. See [docs/perf-log.md](docs/perf-log.md) for numbers.
+- **Writes.** A file is committed when it is closed, against the version it was opened at. If it changed elsewhere in the meantime, the other version stays and yours is saved beside it as a `sync-conflict` copy, as with `dotfs sync`. A delete or rename of something that changed elsewhere fails with `EBUSY` rather than losing that change.
+- **Offline.** The tree and downloaded files survive a restart, so a mount works without the server for whatever is cached; other files fail with `EIO`. Changes made offline are committed when the server is back, while the mount keeps running. Changes still not committed when it exits are moved to the cache's `unsaved/` directory the next time it starts.
+- **Limits.** Symlinks are shown but cannot be created, and neither can hard links or device files. Directory modes and mtimes are not stored. Nested scopes (flag `i`) show as empty directories. The mount is Linux only for now; macOS and Windows backends are planned.
+
 ## Other commands
 
 ```
@@ -146,6 +177,7 @@ See [conformance/README.md](conformance/README.md) for the rest of its flags and
 
 - `client` dials a server (`client.Dial` takes the same `ws://`, `tcp:`, and `unix:` addresses as `dotfs sync`) and exposes the extensions as Go calls: read the index, follow events, run ctl commands, and upload through stage files. `client.Conn` in `client/iface.go` is the interface, and `client/fake` is an in-process implementation for tests.
 - `sync` is the engine behind `dotfs sync`: `sync.New(sync.Config{...})`, then `Sync` for one pass or `Run` to follow changes.
+- `mount` is the platform-neutral core behind `dotfs mount`: `mount.New(ctx, mount.Config{...})` gives a tree to look up, list, open, and change, and `Run` follows changes. `mount/fuse` serves it through FUSE on Linux.
 - `conformance.RunTest(t, target, opts)` runs the conformance suite inside `go test`, for other Go server implementations.
 - `fsproto` parses and writes the protocol's line formats (index lines, event records, and ctl commands and replies).
 
@@ -176,6 +208,7 @@ CI runs gofmt, vet, tests, and race tests on every push to `main` and `dev`.
 | `server/ninep`, `server/auth` | the 9P server and its transports, and attach names and token auth |
 | `client`, `client/fake`, `client/clienttest` | the client library, an in-process fake, and its behavior tests |
 | `sync` | the sync engine |
+| `mount`, `mount/fuse` | on-demand files: the platform-neutral core, and its Linux FUSE backend |
 | `conformance` | protocol tests runnable against any server |
 | `integration`, `bench` | end-to-end tests of the binary, and benchmarks against Syncthing |
 | `cmd/dotfs` | the `dotfs` binary |
