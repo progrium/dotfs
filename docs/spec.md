@@ -356,6 +356,17 @@ The protocol text above leaves some details open. Until it says otherwise, the r
 - The folder remembers its root as `<address>/<name>`. A root of another name is refused. When only the address changes, the client forgets its versions and bootstraps again as a merge: nothing local is deleted, files only on the client are sent, and files that differ become conflict copies.
 - A nested scope is mirrored as a directory only: once flag `i` appears, the client stops tracking what is below it and leaves those local files alone, and when the flag is cleared it re-reads the parent's index. Following nested scopes is left for later.
 
+**On-demand mount** (`dotfs mount`, packages `mount` and `mount/fuse`)
+
+- The mount reads the index once (with `accept zstd`), then follows events from its seq with `coalesce`. Listing and stat are answered from that tree, and a file's content is read from the server the first time it is opened, then kept in a local cache keyed by its hash. An entry without a hash is cached under its path, version, length, and mtime.
+- A file opened for writing is copied to a private working copy, and the copy is committed (`commit-hash` first, then stage and `commit`) when the file is closed or fsynced, with the version it was opened at as the base. A file created in the mount is committed with base `0`.
+- A `conflict` on that commit keeps the server's version at the path and commits the local one beside it with base `0`, named as the sync client names conflict copies. A conflict whose current version is `0` (deleted on the server) commits again with base `0`, so an edit beats a delete, and a missing parent directory is created again first.
+- `mkdir`, `rm`, and `mv` are sent at once, with the version the mount last saw as the base. An `rm` or `mv` that gets `conflict` fails with `EBUSY` and changes nothing, so an edit made elsewhere is not lost. Changes to files below a path are committed before the path is moved. `mv` cannot replace a directory, so renaming over an empty directory first removes it with `rm`.
+- A chmod or a new mtime alone is sent as `commit-hash` with the file's current hash. Directory modes and mtimes are accepted and ignored, as in the sync client, and symlinks, hard links, and device files cannot be created (`EPERM`).
+- Event records for the mount's own changes are recognized by version (a record at or below the version the mount already has for the path is skipped), so they cost nothing.
+- A nested scope (flag `i`) is shown as an empty directory, and clearing the flag re-reads the index.
+- When the server is unreachable, the mount serves the tree it saved and the cached content; opening a file that is not cached fails with `EIO`, and commits are retried until they go through.
+
 **Storage** (server packages `server/store` and `server/meta`)
 
 - `commit-hash` looks at every root of the attaching user, and only at content that is still published at some path in one of them. Content another user holds, or that was deleted, is `missing`.

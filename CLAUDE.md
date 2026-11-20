@@ -11,6 +11,7 @@
   - `conformance/` and `cmd/dotfs/conform.go`: conformance suite (W5)
   - `sync/` and `cmd/dotfs/sync.go`: sync engine (W6)
   - `integration/`, `bench/`, and `docs/perf-log.md`: integration and benchmarks (W7)
+  - `mount/`, `mount/fuse/`, and `cmd/dotfs/mount.go`: native on-demand files, the OS mount (W8)
 - **Frozen interfaces.** `fsproto`, `server/iface.go`, and `client/iface.go` change only in their own small commit, announced to the other threads before it lands.
 - **Shared behavior tests.** Every implementation of a `server` interface runs the matching `server/servertest` tests, and every `client.Conn` runs `client/clienttest`, so fakes and real code stay in step. A behavior the tests don't cover yet gets a test there, not only in your package.
 - **Subcommands.** Each `dotfs` subcommand is its own file in `cmd/dotfs` that calls `register` in `init`; don't edit `main.go` to add one.

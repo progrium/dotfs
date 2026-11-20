@@ -724,7 +724,7 @@ func (f *FS) Close() error {
 	}
 	f.mu.Unlock()
 	if n > 0 {
-		f.logf("warning: %d files could not be committed; they are kept in %s", n, filepath.Join(f.dir, "unsaved"))
+		f.logf("warning: %d files could not be committed; they will be moved to %s at the next start", n, filepath.Join(f.dir, "unsaved"))
 	}
 	return f.conn.Close()
 }
