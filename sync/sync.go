@@ -1,7 +1,7 @@
 // Package sync is the dotfs sync engine: it mirrors one scope of a dotfs
 // server into a plain local folder and keeps the two in step, using the
 // index, events, path operations, and staged commit extensions (the sync
-// profile in docs/spec.md).
+// profile in docs/9p-dotfs.md).
 //
 // # Local state
 //

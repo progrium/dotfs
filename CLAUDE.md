@@ -1,6 +1,6 @@
 # Notes for Claude
 
-- **Sources of truth.** `docs/spec.md` is the protocol; its last section records choices the reference implementation made where the text is silent, so update it when you make another one. The design behind the code is the "dotfs reference implementation design" doc.
+- **Sources of truth.** `docs/9p-dotfs.md` is the protocol and its 9P form, and `docs/http-dotfs.md` maps it onto HTTP. When the implementation makes a choice the text is silent on, add it to the protocol text if clients and servers must agree on it, or to the last section of `docs/9p-dotfs.md` if it is only this implementation's. The design behind the code is the "dotfs reference implementation design" doc.
 - **Branches.** All work lands on `dev` in small commits; rebase on `dev` before each push. Nothing goes to `main` until the integration work is done, as one PR from `dev` to `main`.
 - **Packages and owners.** Stay inside your workstream's packages. Touching another workstream's package needs a message to that thread first.
   - `fsproto/`, `server/iface.go`, `server/ctl.go`, `server/fake/`, `server/servertest/`, `client/iface.go`, `client/fake/`, and `client/clienttest/`: foundation (W0)

@@ -1,4 +1,4 @@
-// Package fsproto holds the line formats of the dotfs protocol (docs/spec.md):
+// Package fsproto holds the line formats of the dotfs protocol (docs/9p-dotfs.md):
 // index lines and headers, event records, ctl commands and replies, the
 // writes that set up an events stream or an index read, and percent-escaping
 // of paths and other fields.
@@ -15,7 +15,6 @@
 // that parses back to the same value.
 //
 // Paths in every struct are unescaped and absolute from the scope root; the
-// encoders and parsers do the escaping. See the "Notes from the reference
-// implementation" section of docs/spec.md for the choices this package makes
-// where the spec is silent.
+// encoders and parsers do the escaping. docs/9p-dotfs.md defines the
+// escaping, sorting, and reply rules this package implements.
 package fsproto

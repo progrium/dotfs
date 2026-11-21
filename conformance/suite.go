@@ -1,5 +1,5 @@
 // Package conformance checks a 9P server against the dotfs protocol in
-// docs/spec.md. It connects to any 9P2000.L address, discovers which
+// docs/9p-dotfs.md. It connects to any 9P2000.L address, discovers which
 // extensions the server offers (index, events, path operations, and staged
 // commit), and runs the tests for each.
 //

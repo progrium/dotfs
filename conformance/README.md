@@ -24,7 +24,7 @@ expect the scope's seq to move only by their own changes.
 
 - `conformance` holds the tests, the runner, and the reports. Each test has an
   ID (`<extension>/<name>`), the spec section it checks (headings in
-  `docs/spec.md` joined by `>`), and a level: `must` failures fail the run,
+  `docs/9p-dotfs.md` joined by `>`), and a level: `must` failures fail the run,
   `should` failures are warnings.
 - `conformance/internal/wire` is a small 9P2000.L codec and client. The suite
   does not use the reference client (package `client`), so the two check each

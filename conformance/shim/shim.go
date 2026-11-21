@@ -596,7 +596,7 @@ func (f *fid) step(ctx context.Context, name string) (*fid, error) {
 
 // fsScope returns the scope whose .fs/ lives in directory f. The shim has
 // only the root scope: the fakes do not implement nested scopes as
-// docs/spec.md settles them, so ctl refuses flag i instead.
+// docs/9p-dotfs.md settles them, so ctl refuses flag i instead.
 func (f *fid) fsScope(ctx context.Context) (server.Scope, bool) {
 	if f.path == "/" {
 		return f.a.root, len(f.a.srv.ext) > 0

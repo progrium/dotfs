@@ -45,7 +45,7 @@ func init() {
 			Run:  testCtlMv,
 		},
 		&Test{
-			ID: "ctl/mv-invalid", Ext: ExtCtl, Section: secNoteReply,
+			ID: "ctl/mv-invalid", Ext: ExtCtl, Section: secPOReplies,
 			Name: "mv into itself and mv between a file and a directory are invalid",
 			Run:  testCtlMvInvalid,
 		},

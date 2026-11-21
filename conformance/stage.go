@@ -50,7 +50,7 @@ func init() {
 			Run:  testStageCommitHash,
 		},
 		&Test{
-			ID: "stage/missing", Ext: ExtStage, Section: secNoteReply, Requires: []Ext{ExtCtl},
+			ID: "stage/missing", Ext: ExtStage, Section: secPOReplies, Requires: []Ext{ExtCtl},
 			Name: "commit of a missing stage file, or into a missing directory, is missing",
 			Run:  testStageMissing,
 		},
@@ -60,7 +60,7 @@ func init() {
 			Run:  testStageAbort,
 		},
 		&Test{
-			ID: "stage/keeps-flags", Ext: ExtStage, Section: secNoteVers, Requires: []Ext{ExtCtl},
+			ID: "stage/keeps-flags", Ext: ExtStage, Section: secPOVers, Requires: []Ext{ExtCtl},
 			Name: "commit keeps the path's flags",
 			Run:  testStageKeepsFlags,
 		},

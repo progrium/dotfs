@@ -11,7 +11,7 @@ Underneath is a small protocol, also called dotfs (9p-dotfs in full): four exten
 | Path operations | `.fs/ctl` | `mv`, `rm`, `mkdir`, `cp`, and flag changes by path, optionally conditional on a version |
 | Staged commit | `.fs/stage/` plus `commit` on ctl | resumable uploads, published atomically if the path is still at the expected version |
 
-Each extension is useful on its own, and any 9P server can implement any of them. Since the root is still an ordinary 9P tree, plain 9P clients can read and write it too, and their changes show up in the index and the events stream like anyone else's. The protocol is specified in [docs/spec.md](docs/spec.md), whose last section records the choices this implementation made where the text is silent.
+Each extension is useful on its own, and any 9P server can implement any of them. Since the root is still an ordinary 9P tree, plain 9P clients can read and write it too, and their changes show up in the index and the events stream like anyone else's. The protocol and its 9P form are specified in [docs/9p-dotfs.md](docs/9p-dotfs.md), and [docs/http-dotfs.md](docs/http-dotfs.md) maps the same extensions onto HTTP.
 
 This repository holds the spec, the reference implementation in Go (server, client library, sync engine, and mount), a conformance suite that checks any 9P server against the spec, and integration tests and benchmarks.
 

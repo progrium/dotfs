@@ -8,7 +8,7 @@ import (
 	"github.com/progrium/dotfs/fsproto"
 )
 
-// Spec sections, as headings in docs/spec.md joined by " > ".
+// Spec sections, as headings in docs/9p-dotfs.md joined by " > ".
 const (
 	secLocation   = "Conventions > Location and scope"
 	secDiscovery  = "Conventions > Discovery"
@@ -33,9 +33,8 @@ const (
 	secStOrder    = "Extension 4: staged commit > Ordering guarantee"
 	secStPlain    = "Extension 4: staged commit > Plain writes"
 	secSecurity   = "Security considerations"
-	secNoteLines  = "Notes from the reference implementation > Line formats"
-	secNoteReply  = "Notes from the reference implementation > Replies"
-	secNoteVers   = "Notes from the reference implementation > Versions and records"
+	secPOReplies  = "Extension 3: path operations > Replies"
+	secPOVers     = "Extension 3: path operations > Versions and records"
 )
 
 func init() {

@@ -49,7 +49,7 @@ func init() {
 			Run:  testEventsPathFilter,
 		},
 		&Test{
-			ID: "events/setup-lines", Ext: ExtEvents, Section: secNoteLines, Requires: []Ext{ExtCtl},
+			ID: "events/setup-lines", Ext: ExtEvents, Section: secEvOpen, Requires: []Ext{ExtCtl},
 			Name: "several setup lines in one write all apply",
 			Run:  testEventsSetupLines,
 		},
