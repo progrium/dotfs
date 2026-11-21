@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,9 @@ type Options struct {
 	// IdleCtl is how many open ctl fids to keep for reuse; 0 means 4, and
 	// a negative value keeps none.
 	IdleCtl int
+	// HTTPClient is the client an HTTPConn sends its requests with; nil
+	// means one with no overall timeout, since event streams stay open.
+	HTTPClient *http.Client
 }
 
 func (o Options) msize() uint32 {
@@ -269,7 +273,11 @@ func IsTransport(err error) bool {
 	}
 	var errno linux.Errno
 	var re *fsproto.ReplyError
+	var he *HTTPError
 	switch {
+	case errors.As(err, &he):
+		// A server error may pass; a refused request will not.
+		return he.Status >= 500
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return false
 	case errors.As(err, &re), errors.As(err, &errno):

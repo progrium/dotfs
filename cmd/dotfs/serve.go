@@ -14,6 +14,7 @@ import (
 
 	"github.com/progrium/dotfs/server/auth"
 	"github.com/progrium/dotfs/server/events"
+	"github.com/progrium/dotfs/server/httpd"
 	"github.com/progrium/dotfs/server/meta"
 	"github.com/progrium/dotfs/server/ninep"
 	"github.com/progrium/dotfs/server/store"
@@ -23,14 +24,15 @@ func init() {
 	c := &command{
 		name:    "serve",
 		usage:   "serve [flags]",
-		summary: "serve roots over 9P (TCP, Unix socket, and WebSocket)",
+		summary: "serve roots over 9P (TCP, Unix socket, and WebSocket) and HTTP",
 	}
 	c.run = func(ctx context.Context, args []string) error {
 		fl := newFlags(c)
 		data := fl.String("data", "dotfs-data", "data `dir`: meta.db, roots/, stage/, and blobs/")
 		tcp := fl.String("tcp", "127.0.0.1:5640", "TCP `addr` for 9P; empty disables")
 		unix := fl.String("unix", "", "Unix socket `path` for 9P")
-		httpAddr := fl.String("http", "", "HTTP `addr` serving 9P over WebSocket at /9p; empty disables")
+		httpAddr := fl.String("http", "", "HTTP `addr` serving 9P over WebSocket at /9p and http-dotfs at /r/<root>/; empty disables")
+		httpAPI := fl.Bool("http-api", true, "serve http-dotfs at /r/<root>/ on the -http listener")
 		cert := fl.String("tls-cert", "", "TLS certificate `file` for -http (wss://)")
 		key := fl.String("tls-key", "", "TLS key `file` for -http")
 		origins := fl.String("origins", "", "comma-separated extra WebSocket origin `patterns`")
@@ -107,12 +109,21 @@ func init() {
 			}
 			mux := http.NewServeMux()
 			mux.Handle("/9p", ws)
+			if *httpAPI {
+				mux.Handle("/r/", httpd.New(httpd.Config{
+					Meta: m, Store: st, Hub: hub, Tokens: m,
+					CreateRoots: *createRoots, Logf: log.Printf,
+				}))
+			}
 			hs := &http.Server{Addr: *httpAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 			go func() {
 				<-ctx.Done()
 				hs.Close()
 			}()
 			log.Printf("9p over websocket on %s/9p", *httpAddr)
+			if *httpAPI {
+				log.Printf("http-dotfs on %s/r/<root>/", *httpAddr)
+			}
 			n++
 			go func() {
 				var err error

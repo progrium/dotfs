@@ -21,7 +21,7 @@ func init() {
 	}
 	c.run = func(ctx context.Context, args []string) error {
 		fs := newFlags(c)
-		token := fs.String("token", os.Getenv("DOTFS_TOKEN"), "bearer token for a WebSocket server (default $DOTFS_TOKEN)")
+		token := fs.String("token", os.Getenv("DOTFS_TOKEN"), "bearer token for a WebSocket or HTTP server (default $DOTFS_TOKEN)")
 		device := fs.String("device", "", "device id for events and conflict copies (default: kept in the folder's state, or made from the host name)")
 		once := fs.Bool("once", false, "sync once and exit instead of following changes")
 		debounce := fs.Duration("debounce", time.Second, "how long local changes settle before they are committed")
@@ -39,6 +39,7 @@ func init() {
   tcp:host:port/<name>, or host:port/<name>
   unix:/path/to/socket/<name>
   ws://host/path/<name>, wss://host/path/<name>
+  http://host/r/<name>, https://host/r/<name>   (http-dotfs)
 
 The folder's sync state lives in <dir>/%s/, which is never synced.
 
@@ -69,7 +70,7 @@ The folder's sync state lives in <dir>/%s/, which is never synced.
 			Dir:  fs.Arg(1),
 			Root: fs.Arg(0),
 			Dial: func(ctx context.Context) (client.Conn, error) {
-				return client.Dial(ctx, addr, client.Options{Root: name, Token: *token})
+				return client.DialConn(ctx, addr, client.Options{Root: name, Token: *token})
 			},
 			Device:       *device,
 			Debounce:     *debounce,
