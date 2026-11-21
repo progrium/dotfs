@@ -229,13 +229,16 @@ func (s *Server) Token() string {
 // Client is a dotfs sync process for one folder, connected through its own
 // proxy so a test can cut, delay, or block its connection.
 type Client struct {
-	t      testing.TB
-	srv    *Server
-	Name   string
-	Dir    string
-	Root   string
-	Proxy  *Proxy
-	Flags  []string
+	t     testing.TB
+	srv   *Server
+	Name  string
+	Dir   string
+	Root  string
+	Proxy *Proxy
+	Flags []string
+	// HTTP makes the client use http-dotfs at /r/<root> instead of 9P over
+	// WebSocket.
+	HTTP   bool
 	out    *logBuf
 	p      *proc
 	starts int
@@ -260,7 +263,7 @@ func NewClient(t testing.TB, srv *Server, name, root string) *Client {
 func (c *Client) Start() *Client {
 	c.t.Helper()
 	c.starts++
-	url := fmt.Sprintf("ws://%s/9p/%s", c.Proxy.Addr(), c.Root)
+	url := c.url()
 	fmt.Fprintf(c.out, "--- start %d\n", c.starts)
 	args := []string{"sync", "-device", c.Name, "-debounce", "100ms", "-scan", "2s"}
 	args = append(args, c.Flags...)
@@ -269,10 +272,18 @@ func (c *Client) Start() *Client {
 	return c
 }
 
+// url is the root's address through the client's proxy.
+func (c *Client) url() string {
+	if c.HTTP {
+		return fmt.Sprintf("http://%s/r/%s", c.Proxy.Addr(), c.Root)
+	}
+	return fmt.Sprintf("ws://%s/9p/%s", c.Proxy.Addr(), c.Root)
+}
+
 // Once runs dotfs sync -once in the foreground and returns its error.
 func (c *Client) Once() error {
 	c.t.Helper()
-	url := fmt.Sprintf("ws://%s/9p/%s", c.Proxy.Addr(), c.Root)
+	url := c.url()
 	cmd := exec.Command(bin, "sync", "-once", "-device", c.Name, url, c.Dir)
 	cmd.Env = append(os.Environ(), "DOTFS_TOKEN="+c.srv.Token())
 	cmd.Stdout, cmd.Stderr = c.out, c.out
