@@ -13,9 +13,9 @@ import (
 //	http://host/r/<root>/, https://host/r/<root>/   http-dotfs (docs/http-dotfs.md)
 //
 // Without opts.Root, an HTTP address is the root's base URL. With it, the
-// address is the server's URL and the base is <addr>/r/<root>/, the layout
-// of dotfs serve; an address already ending in /r gets just <root>/. So
-// both https://host with root "home" and https://host/r with root "home"
+// base is <addr>/<root>/, or <addr>/r/<root>/ (the layout of dotfs serve)
+// when addr has no path. So https://host/r with root "home" (how dotfs
+// sync splits https://host/r/home) and https://host with root "home" both
 // dial https://host/r/home/. opts.Token is sent as a bearer token. DialConn checks an
 // HTTP address with GET .fs/, so a wrong URL or token fails here rather
 // than on the first call.
@@ -29,8 +29,8 @@ func DialConn(ctx context.Context, addr string, opts Options) (Conn, error) {
 	}
 	if opts.Root != "" {
 		p := strings.TrimSuffix(u.Path, "/")
-		if !strings.HasSuffix(p, "/r") {
-			p += "/r"
+		if p == "" {
+			p = "/r"
 		}
 		u.Path = p + "/" + opts.Root + "/"
 		u.RawPath = ""

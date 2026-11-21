@@ -27,7 +27,7 @@ func init() {
 	}
 	c.run = func(ctx context.Context, args []string) error {
 		fs := newFlags(c)
-		token := fs.String("token", os.Getenv("DOTFS_TOKEN"), "bearer token for a WebSocket server (default $DOTFS_TOKEN)")
+		token := fs.String("token", os.Getenv("DOTFS_TOKEN"), "bearer token for a WebSocket or HTTP server (default $DOTFS_TOKEN)")
 		device := fs.String("device", "", "device id for events and conflict copies (default: made from the host name)")
 		cacheDir := fs.String("cache", "", "cache directory (default: $XDG_CACHE_HOME/dotfs/mount/<root>)")
 		cacheSize := fs.Int64("cache-size", mount.DefaultCacheSize>>20, "content cache limit in MiB")
@@ -47,7 +47,7 @@ func init() {
   tcp:host:port/<name>, or host:port/<name>
   unix:/path/to/socket/<name>
   ws://host/path/<name>, wss://host/path/<name>
-  http://host/<name>, https://host/<name>   (http-dotfs, at /r/<name>/)
+  http://host/r/<name>, https://host/r/<name>   (http-dotfs)
 
 The whole tree is listed at once from the root's index; a file's content
 is downloaded the first time it is opened and kept in the cache. Writes
