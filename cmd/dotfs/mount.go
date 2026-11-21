@@ -47,6 +47,7 @@ func init() {
   tcp:host:port/<name>, or host:port/<name>
   unix:/path/to/socket/<name>
   ws://host/path/<name>, wss://host/path/<name>
+  http://host/<name>, https://host/<name>   (http-dotfs, at /r/<name>/)
 
 The whole tree is listed at once from the root's index; a file's content
 is downloaded the first time it is opened and kept in the cache. Writes
@@ -90,7 +91,7 @@ stop the process.
 			Dial: func(ctx context.Context) (client.Conn, error) {
 				ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 				defer cancel()
-				return client.Dial(ctx, addr, client.Options{Root: name, Token: *token, Device: *device})
+				return client.DialConn(ctx, addr, client.Options{Root: name, Token: *token, Device: *device})
 			},
 			Root:       root,
 			CacheDir:   *cacheDir,

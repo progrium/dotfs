@@ -39,6 +39,7 @@ func init() {
   tcp:host:port/<name>, or host:port/<name>
   unix:/path/to/socket/<name>
   ws://host/path/<name>, wss://host/path/<name>
+  http://host/<name>, https://host/<name>   (http-dotfs, at /r/<name>/)
 
 The folder's sync state lives in <dir>/%s/, which is never synced.
 
@@ -69,7 +70,7 @@ The folder's sync state lives in <dir>/%s/, which is never synced.
 			Dir:  fs.Arg(1),
 			Root: fs.Arg(0),
 			Dial: func(ctx context.Context) (client.Conn, error) {
-				return client.Dial(ctx, addr, client.Options{Root: name, Token: *token})
+				return client.DialConn(ctx, addr, client.Options{Root: name, Token: *token})
 			},
 			Device:       *device,
 			Debounce:     *debounce,
