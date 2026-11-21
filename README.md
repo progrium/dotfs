@@ -31,7 +31,7 @@ go build -o dotfs ./cmd/dotfs
 
 ## Quick start
 
-Start a server. By default it keeps its data in `./dotfs-data` and listens for 9P on `127.0.0.1:5640`; `-http` adds 9P over WebSocket at `/9p`.
+Start a server. By default it keeps its data in `./dotfs-data` and listens for 9P on `127.0.0.1:5640`; `-http` adds 9P over WebSocket at `/9p` and the HTTP form of the protocol (http-dotfs) at `/r/<root>/`.
 
 ```
 dotfs serve -data ./dotfs-data -http 127.0.0.1:8080
@@ -52,6 +52,12 @@ dotfs sync ws://127.0.0.1:8080/9p/home ~/Sync
 
 Run the same command with another folder (on this machine or another) and the two stay in step. `dotfs sync` keeps running and follows changes; add `-once` to sync once and exit.
 
+`http://127.0.0.1:8080/r/home` works in place of the WebSocket address, and the same root answers plain HTTP, so `curl` can read and write it too:
+
+```
+curl -H "Authorization: Bearer $DOTFS_TOKEN" http://127.0.0.1:8080/r/home/.fs/index
+```
+
 ## Running the server
 
 ```
@@ -63,7 +69,8 @@ dotfs serve [flags]
 | `-data dir` | `dotfs-data` | data directory: `meta.db`, `roots/`, `stage/`, and `blobs/` |
 | `-tcp addr` | `127.0.0.1:5640` | TCP address for 9P; empty disables it |
 | `-unix path` | | Unix socket for 9P |
-| `-http addr` | | HTTP address serving 9P over WebSocket at `/9p`; empty disables it |
+| `-http addr` | | HTTP address serving 9P over WebSocket at `/9p` and http-dotfs at `/r/<root>/`; empty disables it |
+| `-http-api` | `true` | serve http-dotfs on the `-http` listener |
 | `-tls-cert file`, `-tls-key file` | | serve `-http` over TLS (`wss://`) |
 | `-origins patterns` | | comma-separated extra WebSocket origin patterns, for browser clients |
 | `-require-token` | `false` | require a token in the attach name on TCP and Unix listeners |
@@ -97,6 +104,7 @@ dotfs sync [flags] <root> <dir>
 
 ```
 ws://host:port/9p/<name>, wss://host/9p/<name>      WebSocket; token from -token or $DOTFS_TOKEN
+http://host:port/r/<name>, https://host/r/<name>    http-dotfs; token from -token or $DOTFS_TOKEN
 host:port/<name>?token=<token>, tcp:host:port/...   TCP
 unix:/path/to/socket/<name>?token=<token>           Unix socket
 ```
@@ -175,10 +183,11 @@ See [conformance/README.md](conformance/README.md) for the rest of its flags and
 
 ## Using dotfs from Go
 
-- `client` dials a server (`client.Dial` takes the same `ws://`, `tcp:`, and `unix:` addresses as `dotfs sync`) and exposes the extensions as Go calls: read the index, follow events, run ctl commands, and upload through stage files. `client.Conn` in `client/iface.go` is the interface, and `client/fake` is an in-process implementation for tests.
+- `client` dials a server (`client.DialConn` takes the same addresses as `dotfs sync`, using `client.HTTPConn` for `http://` and `https://` and the 9P client for the rest) and exposes the extensions as Go calls: read the index, follow events, run ctl commands, and upload through stage files. `client.Conn` in `client/iface.go` is the interface, and `client/fake` is an in-process implementation for tests.
 - `sync` is the engine behind `dotfs sync`: `sync.New(sync.Config{...})`, then `Sync` for one pass or `Run` to follow changes.
 - `mount` is the platform-neutral core behind `dotfs mount`: `mount.New(ctx, mount.Config{...})` gives a tree to look up, list, open, and change, and `Run` follows changes. `mount/fuse` serves it through FUSE on Linux.
 - `conformance.RunTest(t, target, opts)` runs the conformance suite inside `go test`, for other Go server implementations.
+- `server/httpd` serves http-dotfs from the same backend as the 9P server; mount it on any `http.ServeMux`.
 - `fsproto` parses and writes the protocol's line formats (index lines, event records, and ctl commands and replies).
 
 ## Tests and benchmarks
